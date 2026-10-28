@@ -1,0 +1,13 @@
+[project]
+name = "play-my-list"
+version = "0.1.0"
+description = "Telegram playlist builder and publisher"
+requires-python = ">=3.11"
+dependencies = ["aiogram>=3.13,<4", "aiohttp>=3.10,<4", "aiosqlite>=0.20,<1", "python-dotenv>=1.0,<2"]
+
+[project.scripts]
+play-my-list = "bot.main:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

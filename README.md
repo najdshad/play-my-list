@@ -6,7 +6,7 @@ The bot indexes audio from a **vault channel** you choose, you arrange playlists
 
 **The bot never stores audio.** It keeps message references, `file_id`s and metadata only. Files stay in the vault channel.
 
-> **Status:** spec stage. [`PRD.md`](PRD.md) is the source of truth for behaviour, data model, API and open risks. This README covers the essentials only.
+[`PRD.md`](PRD.md) describes the behaviour, data model and API implemented here.
 
 ## How it works
 
@@ -26,7 +26,7 @@ The bot indexes audio from a **vault channel** you choose, you arrange playlists
 ```bash
 git clone <repo> && cd play-my-list
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 cp .env.example .env   # fill in BOT_TOKEN, OWNER_ID, WEB_APP_URL
 python -m bot.main
 ```
