@@ -36,7 +36,7 @@ This bot lets a single owner build ordered music playlists and publish them as c
 | Channel | Bot role | Required rights | Why |
 |---|---|---|---|
 | Vault | Admin | Post Messages, Delete Messages | Receive `channel_post` updates and run the max-ID probe (post a temporary message, then delete it) |
-| Playlist | Admin | Post Messages, Delete Messages | Publish tracks. With `can_delete_messages`, the bot can delete any channel message, so the 48-hour deletion limit doesn't apply. |
+| Playlist | Admin | Post Messages, Delete Messages | Publish tracks. Telegram documents a 48-hour deletion limit even for channel administrators. Republishing must fail safely when earlier posts cannot be deleted; the owner can clear them manually and retry. |
 | Owner DM | — | — | Forward-probe target: forwarded copies are read, then deleted |
 
 ## 5. Core Workflows
@@ -50,7 +50,7 @@ This bot lets a single owner build ordered music playlists and publish them as c
    - If the forward contains `audio`, the bot saves or updates the track by `file_unique_id`.
    - The forwarded copy is deleted from the DM straight away.
    - If the message is missing or can't be forwarded (deleted, or a service message), the bot treats it as a gap and moves on.
-   - `scan_cursor` is saved after every ID, so the scan can resume after a restart.
+   - `scan_cursor` is saved after every successfully processed ID or confirmed gap. Temporary failures are retried with a bounded backoff; exhausted retries or permission failures stop scanning without advancing past the failed ID. Interrupted scans resume on startup; `/resumescan` resumes failed scans.
    - The loop waits `SCAN_DELAY_SECONDS` between calls and honors `RetryAfter`.
 5. The scan runs in the background. `/scanstatus` shows `cursor / max` and how many tracks are indexed.
 6. **Live indexing:** a `channel_post` handler indexes new audio as soon as it's posted to the vault.
@@ -75,18 +75,18 @@ This bot lets a single owner build ordered music playlists and publish them as c
 2. **Pre-flight checks:**
    - The playlist has a channel.
    - `getChatMember` confirms the bot still has post and delete rights there.
-   - No other publish is running for this playlist (per-playlist lock).
-3. **Clear:** the bot deletes the tracked `published_messages` with `deleteMessages`, in batches of up to 100. Any IDs that fail are logged and dropped from tracking.
+   - No other publish is running for this playlist or any channel involved in cleanup/posting. Editing is blocked while a playlist is publishing.
+3. **Clear:** the bot deletes the tracked `published_messages` with `deleteMessages`, in batches of up to 100. Tracking is removed only after a successful delete response. A failure stops publication before new posts are sent, retaining the failed and unattempted IDs. Posts beyond Telegram's deletion window must be removed manually before retrying.
 4. **Post:** for each track, in order:
-   - First it tries `copyMessage(vault → playlist, vault_message_id)`. Copying leaves no "forwarded from" header.
-   - If that fails, it tries `sendAudio(playlist, file_id)`.
-   - If both fail, the track is skipped and marked `missing = 1`.
+   - First it tries `copyMessage(track.vault_chat_id → playlist, vault_message_id)`. Each track retains its source channel across vault changes. Copying leaves no "forwarded from" header.
+   - If Telegram explicitly reports that the source cannot be copied, it tries `sendAudio(playlist, file_id)`. Ambiguous network failures stop the job rather than risking a duplicate send.
+   - Only an explicit invalid audio file identifier causes the track to be skipped and marked `missing = 1`; permission/network failures stop the job with an error.
    - Each new `message_id` is saved to `published_messages` immediately.
    - The bot waits `PUBLISH_DELAY_SECONDS` between tracks and honors `RetryAfter`.
 5. **Progress:** a job record (`status, progress, total, skipped`) is updated as tracks are posted. The Mini App polls `/api/jobs/:id`, and a status message in the owner's DM is edited every N tracks.
 6. **Finish:** the bot sends a summary with how many tracks were posted and skipped, plus a list of skipped titles.
 
-**Crash recovery:** because message IDs are saved as soon as each one is posted, the next publish cleans up partial output correctly.
+**Crash recovery:** message IDs returned by Telegram are saved immediately. Startup marks abandoned jobs interrupted; the next publish cleans up tracked partial output. Telegram delivery and SQLite commits cannot be atomic: a crash or lost reply after Telegram accepts a post may leave an untracked message requiring manual cleanup. Graceful shutdown cancels and awaits services before closing SQLite and the bot session.
 
 ## 6. Data Model
 
@@ -114,7 +114,8 @@ This bot lets a single owner build ordered music playlists and publish them as c
 | id | INTEGER PK | |
 | file_unique_id | TEXT UNIQUE | Key used to avoid duplicates |
 | file_id | TEXT | Used by the `sendAudio` fallback |
-| vault_message_id | INTEGER | Source for `copyMessage` |
+| vault_message_id | INTEGER | Source message for `copyMessage` |
+| vault_chat_id | INTEGER NULL | Per-track verified source channel; legacy rows remain NULL and fall back to file ID until rescanned |
 | title | TEXT NULL | From audio metadata |
 | performer | TEXT NULL | From audio metadata |
 | file_name | TEXT NULL | Searched when tags are empty |
@@ -152,7 +153,7 @@ Indexes cover `title`, `performer` and `file_name`. FTS5 is an option if the vau
 | track_id | INTEGER NULL | |
 | published_at | TEXT | |
 
-The schema version is tracked with `PRAGMA user_version`. The database runs in WAL mode with foreign keys enabled.
+The schema version is tracked with `PRAGMA user_version` (v2). An in-place migration preserves v1 data. Legacy source channels remain unknown rather than trusting the mutable global vault setting; those tracks publish by file ID until a scan verifies their source. The database runs in WAL mode with foreign keys enabled.
 
 ## 7. Bot Commands
 
@@ -162,13 +163,14 @@ The schema version is tracked with `PRAGMA user_version`. The database runs in W
 | `/setvault` | Choose the vault channel and start the first scan |
 | `/scanstatus` | Show scan progress and track count |
 | `/rescan` | Scan the whole vault again |
+| `/resumescan` | Resume a failed scan from the saved cursor |
 | `/newplaylist <name>` | Create an empty playlist |
 | `/list` | List playlists with track counts and channels |
 | `/publish <name>` | Publish a playlist |
 
 ## 8. Mini App
 
-**Stack:** plain HTML, CSS and JS, with Sortable.js loaded from a CDN. There is no build step.
+**Stack:** packaged plain HTML, CSS and JS, with pointer/touch drag handles and keyboard-accessible move buttons. There is no build step or drag library dependency. `/` serves the application index explicitly.
 
 **Auth:** every request sends `X-Telegram-Init-Data`. The server:
 - builds the secret key as `HMAC_SHA256("WebAppData", BOT_TOKEN)`,
@@ -185,7 +187,7 @@ The schema version is tracked with `PRAGMA user_version`. The database runs in W
 - Colors follow Telegram's `themeParams`, so light and dark mode work automatically.
 - Uses Telegram's native `BackButton` and `MainButton` (as "Publish").
 - Haptic feedback when tracks are dragged and dropped.
-- Changes show up immediately (optimistic updates). Reorder saves are debounced by about 400ms and rolled back if the save fails.
+- Reorders save on drop; editing is serialized while a save is pending. Failed reorders restore the saved order and show an error. Search requests ignore stale responses. Publish polling stops on navigation, resumes from the latest job on reopening, and offers a retry after a status request fails.
 - Empty, loading and error states are designed explicitly.
 
 ## 9. API
@@ -221,7 +223,7 @@ Errors use the shape `{error, code}`, with status 400 (invalid input), 401 (fail
 │ aiohttp                                                │
 │   ├─ /       → Mini App static files                   │
 │   └─ /api/*  → REST (initData middleware)              │
-│ SQLite (aiosqlite, WAL)                                │
+│ SQLite (sqlite3, WAL)                                │
 └────────────────────────────────────────────────────────┘
 
 
@@ -243,10 +245,10 @@ Errors use the shape `{error, code}`, with status 400 (invalid input), 401 (fail
 | Bot removed from the vault | Scanning stops, `scan_state = error`, the owner is notified, and the existing index is kept |
 | `copyMessage` fails | Falls back to `sendAudio(file_id)` |
 | Both fail | Skips the track, sets `missing = 1` and reports it in the summary |
-| Delete fails during publish | Logs it, stops tracking that message and carries on |
+| Delete fails during publish | Stops before posting, retains undeleted message tracking, and explains how to retry |
 | Publish already running | 409 response, "already publishing" |
 | Bad or expired `initData` | 401 response, the Mini App shows a "reopen from bot" screen |
-| Crash during a scan or publish | Picks up from `scan_cursor`. Messages already published are cleaned up by the next publish. |
+| Crash during a scan or publish | Scan resumes from `scan_cursor`; abandoned jobs become interrupted. Returned message IDs are cleaned up by the next publish. Unacknowledged sends may require manual cleanup. |
 
 ## 13. Configuration
 
@@ -264,9 +266,9 @@ LOG_LEVEL=INFO
 
 ## 14. Dependencies
 
-aiogram>=3.7
-aiosqlite>=0.20
-aiohttp>=3.9
+aiogram>=3.13,<4
+aiohttp>=3.10,<4
+python-dotenv>=1.0,<2
 
 
 **Deployment:** Docker or systemd, with Caddy in front for automatic HTTPS and a daily `sqlite3 .backup`.
@@ -279,19 +281,16 @@ playlist-bot/
 │   ├── config.py
 │   ├── db/
 │   │   ├── schema.sql
-│   │   ├── migrate.py
-│   │   └── queries.py
+│   │   └── database.py
 │   ├── handlers/
-│   │   ├── commands.py
-│   │   ├── vault.py
-│   │   └── membership.py
+│   │   └── owner.py
 │   ├── api/
-│   │   ├── routes.py
-│   │   └── middleware.py
+│   │   └── server.py
 │   └── services/
 │       ├── scanner.py
 │       ├── publisher.py
-│       └── auth.py
+│       ├── auth.py
+│       └── telegram.py
 ├── miniapp/
 │   ├── index.html
 │   ├── app.js
@@ -299,7 +298,7 @@ playlist-bot/
 ├── tests/
 ├── data/
 ├── .env.example
-├── Dockerfile
+├── pyproject.toml
 ├── requirements.txt
 └── README.md
 
@@ -316,5 +315,5 @@ playlist-bot/
 ## 17. Open Risks (checked in Phase 0)
 
 1. **Scan speed on large vaults.** If forward-probing is too slow, the fallback is Pyrogram with the bot token, whose `get_messages` reads messages by ID without forwarding.
-2. **Deleting old messages.** We need to confirm that `can_delete_messages` really removes the 48-hour limit on channel posts.
+2. **Deleting old messages.** Telegram documents a 48-hour limit; admin rights do not remove it. The bot retains tracking and stops if cleanup fails. The owner must manually clear undeletable posts before retrying.
 3. **Real channel posting limits.** We need to test the actual 429 threshold so we can tune `PUBLISH_DELAY_SECONDS`.

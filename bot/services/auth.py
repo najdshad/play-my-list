@@ -11,7 +11,9 @@ class AuthError(ValueError):
     pass
 
 
-def verify_init_data(init_data: str, bot_token: str, owner_id: int, max_age: int = 86400) -> dict[str, str]:
+def verify_init_data(
+    init_data: str, bot_token: str, owner_id: int, max_age: int = 86400
+) -> dict[str, str]:
     if not init_data:
         raise AuthError("missing init data")
     fields = dict(parse_qsl(init_data, keep_blank_values=True))
@@ -28,7 +30,11 @@ def verify_init_data(init_data: str, bot_token: str, owner_id: int, max_age: int
         user_id = int(json.loads(fields.get("user", "{}"))["id"])
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise AuthError("invalid user data") from exc
-    if auth_date <= 0 or time.time() - auth_date > max_age or auth_date > time.time() + 60:
+    if (
+        auth_date <= 0
+        or time.time() - auth_date > max_age
+        or auth_date > time.time() + 60
+    ):
         raise AuthError("expired init data")
     if user_id != owner_id:
         raise AuthError("unauthorized user")

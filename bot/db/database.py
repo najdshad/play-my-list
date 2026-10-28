@@ -22,10 +22,27 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > 2:
+            self.close()
+            raise RuntimeError("Database was created by a newer version of the app")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript((Path(__file__).with_name("schema.sql")).read_text())
-        self.conn.execute("PRAGMA user_version=1")
+        # v1 only stored a global vault, which may already have changed. Leave
+        # legacy sources unknown and publish by file_id until a scan verifies
+        # their actual source, rather than copying a potentially unrelated post.
+        if "vault_chat_id" not in {
+            r[1] for r in self.conn.execute("PRAGMA table_info(tracks)")
+        }:
+            self.conn.execute("ALTER TABLE tracks ADD COLUMN vault_chat_id INTEGER")
+        if "skipped_titles" not in {
+            r[1] for r in self.conn.execute("PRAGMA table_info(jobs)")
+        }:
+            self.conn.execute(
+                "ALTER TABLE jobs ADD COLUMN skipped_titles TEXT NOT NULL DEFAULT '[]'"
+            )
+        self.conn.execute("PRAGMA user_version=2")
         self.conn.commit()
         return self
 
@@ -67,52 +84,108 @@ class Database:
         return row["value"] if row else default
 
     def set_setting(self, key: str, value: Any) -> None:
-        self.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+        self.execute(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(value)),
+        )
 
     def upsert_track(self, data: dict[str, Any]) -> int:
+        source = self.setting("vault_chat_id")
+        data = {"vault_chat_id": int(source) if source else None, **data}
         with self.transaction() as conn:
-            conn.execute("""INSERT INTO tracks(file_unique_id,file_id,vault_message_id,title,performer,file_name,duration,file_size,missing,indexed_at)
-                VALUES(:file_unique_id,:file_id,:vault_message_id,:title,:performer,:file_name,:duration,:file_size,0,:indexed_at)
-                ON CONFLICT(file_unique_id) DO UPDATE SET file_id=excluded.file_id, vault_message_id=excluded.vault_message_id,
+            conn.execute(
+                """INSERT INTO tracks(file_unique_id,file_id,vault_message_id,vault_chat_id,title,performer,file_name,duration,file_size,missing,indexed_at)
+                VALUES(:file_unique_id,:file_id,:vault_message_id,:vault_chat_id,:title,:performer,:file_name,:duration,:file_size,0,:indexed_at)
+                ON CONFLICT(file_unique_id) DO UPDATE SET file_id=excluded.file_id, vault_message_id=excluded.vault_message_id, vault_chat_id=excluded.vault_chat_id,
                 title=excluded.title, performer=excluded.performer, file_name=excluded.file_name, duration=excluded.duration,
-                file_size=excluded.file_size, missing=0, indexed_at=excluded.indexed_at""", {**data, "indexed_at": data.get("indexed_at", now_iso())})
-            return int(conn.execute("SELECT id FROM tracks WHERE file_unique_id=?", (data["file_unique_id"],)).fetchone()[0])
+                file_size=excluded.file_size, missing=0, indexed_at=excluded.indexed_at""",
+                {**data, "indexed_at": data.get("indexed_at", now_iso())},
+            )
+            return int(
+                conn.execute(
+                    "SELECT id FROM tracks WHERE file_unique_id=?",
+                    (data["file_unique_id"],),
+                ).fetchone()[0]
+            )
 
     def create_playlist(self, name: str) -> sqlite3.Row:
         name = name.strip()
         if not name or len(name) > 100:
             raise ValueError("playlist name must be 1-100 characters")
         with self.transaction() as conn:
-            cur = conn.execute("INSERT INTO playlists(name,created_at) VALUES(?,?)", (name, now_iso()))
-            return conn.execute("SELECT * FROM playlists WHERE id=?", (cur.lastrowid,)).fetchone()
+            cur = conn.execute(
+                "INSERT INTO playlists(name,created_at) VALUES(?,?)", (name, now_iso())
+            )
+            return conn.execute(
+                "SELECT * FROM playlists WHERE id=?", (cur.lastrowid,)
+            ).fetchone()
 
     def playlist(self, playlist_id: int) -> sqlite3.Row | None:
         return self.fetchone("SELECT * FROM playlists WHERE id=?", (playlist_id,))
 
     def playlists(self) -> list[sqlite3.Row]:
-        return self.fetchall("""SELECT p.*, COUNT(pt.track_id) track_count FROM playlists p
+        return self.fetchall("""SELECT p.*, c.title channel_title,
+            COALESCE(c.is_member AND c.can_post AND c.can_delete, 0) channel_available,
+            COUNT(pt.track_id) track_count FROM playlists p
+            LEFT JOIN channels c ON c.chat_id=p.channel_id
             LEFT JOIN playlist_tracks pt ON pt.playlist_id=p.id GROUP BY p.id ORDER BY p.created_at, p.id""")
 
     def playlist_tracks(self, playlist_id: int) -> list[sqlite3.Row]:
-        return self.fetchall("""SELECT t.*, pt.position FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id
-            WHERE pt.playlist_id=? ORDER BY pt.position""", (playlist_id,))
+        return self.fetchall(
+            """SELECT t.*, pt.position FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id
+            WHERE pt.playlist_id=? ORDER BY pt.position""",
+            (playlist_id,),
+        )
 
     def set_playlist_order(self, playlist_id: int, track_ids: list[int]) -> None:
         with self.transaction() as conn:
-            conn.execute("DELETE FROM playlist_tracks WHERE playlist_id=?", (playlist_id,))
-            conn.executemany("INSERT INTO playlist_tracks(playlist_id,track_id,position) VALUES(?,?,?)", [(playlist_id, tid, pos) for pos, tid in enumerate(track_ids)])
+            conn.execute(
+                "DELETE FROM playlist_tracks WHERE playlist_id=?", (playlist_id,)
+            )
+            conn.executemany(
+                "INSERT INTO playlist_tracks(playlist_id,track_id,position) VALUES(?,?,?)",
+                [(playlist_id, tid, pos) for pos, tid in enumerate(track_ids)],
+            )
 
     def add_track(self, playlist_id: int, track_id: int) -> None:
         with self.transaction() as conn:
-            if not conn.execute("SELECT 1 FROM tracks WHERE id=?", (track_id,)).fetchone():
+            if not conn.execute(
+                "SELECT 1 FROM tracks WHERE id=?", (track_id,)
+            ).fetchone():
                 raise LookupError("track not found")
-            if conn.execute("SELECT 1 FROM playlist_tracks WHERE playlist_id=? AND track_id=?", (playlist_id, track_id)).fetchone():
+            if conn.execute(
+                "SELECT 1 FROM playlist_tracks WHERE playlist_id=? AND track_id=?",
+                (playlist_id, track_id),
+            ).fetchone():
                 return
-            pos = conn.execute("SELECT COALESCE(MAX(position),-1)+1 FROM playlist_tracks WHERE playlist_id=?", (playlist_id,)).fetchone()[0]
-            conn.execute("INSERT INTO playlist_tracks VALUES(?,?,?)", (playlist_id, track_id, pos))
+            pos = conn.execute(
+                "SELECT COALESCE(MAX(position),-1)+1 FROM playlist_tracks WHERE playlist_id=?",
+                (playlist_id,),
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO playlist_tracks VALUES(?,?,?)",
+                (playlist_id, track_id, pos),
+            )
 
-    def search_tracks(self, query: str = "", limit: int = 50, offset: int = 0) -> list[sqlite3.Row]:
-        limit = max(1, min(int(limit), 100)); offset = max(0, int(offset))
+    def search_tracks(
+        self, query: str = "", limit: int = 50, offset: int = 0
+    ) -> list[sqlite3.Row]:
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
         q = f"%{query.strip()}%"
-        return self.fetchall("""SELECT id,title,performer,file_name,duration,missing FROM tracks
-            WHERE (?='' OR title LIKE ? OR performer LIKE ? OR file_name LIKE ?) ORDER BY indexed_at DESC LIMIT ? OFFSET ?""", (query.strip(), q, q, q, limit, offset))
+        return self.fetchall(
+            """SELECT id,title,performer,file_name,duration,missing FROM tracks
+            WHERE (?='' OR title LIKE ? OR performer LIKE ? OR file_name LIKE ?)
+            AND (? IS NULL OR vault_chat_id=CAST(? AS INTEGER))
+            ORDER BY indexed_at DESC, id DESC LIMIT ? OFFSET ?""",
+            (
+                query.strip(),
+                q,
+                q,
+                q,
+                self.setting("vault_chat_id"),
+                self.setting("vault_chat_id"),
+                limit,
+                offset,
+            ),
+        )
