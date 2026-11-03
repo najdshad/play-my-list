@@ -14,6 +14,8 @@ class Scanner:
     def __init__(self, bot: Any, db: Database, owner_id: int, delay: float = 1.0):
         self.bot, self.db, self.owner_id, self.delay = bot, db, owner_id, delay
         self.task: asyncio.Task | None = None
+        self.batch = 100
+        self.concurrency = 3
 
     async def select_vault(self, chat_id: int) -> None:
         if self.task and not self.task.done():
@@ -66,6 +68,24 @@ class Scanner:
             if self.db.setting("scan_state") == "running":
                 self.db.set_setting("scan_state", "paused")
 
+    async def forward_message(
+        self, vault_chat_id: int, message_id: int, semaphore: asyncio.Semaphore
+    ) -> Any:
+        async with semaphore:
+            try:
+                return await retry_telegram(
+                    self.bot.forward_message,
+                    self.owner_id,
+                    vault_chat_id,
+                    message_id,
+                    retry_transient=True,
+                )
+            except Exception as exc:
+                if not scan_gap(exc):
+                    raise
+                log.debug("Scan gap at %s: %s", message_id, exc)
+                return None
+
     async def run(self, vault_chat_id: int) -> None:
         self.db.set_setting("scan_state", "running")
         try:
@@ -81,34 +101,43 @@ class Scanner:
             )
             self.db.set_setting("scan_max_id", max_id - 1)
             cursor = int(self.db.setting("scan_cursor", "0") or 0)
-            for message_id in range(cursor + 1, max_id):
-                try:
-                    forwarded = await retry_telegram(
-                        self.bot.forward_message,
-                        self.owner_id,
-                        vault_chat_id,
-                        message_id,
-                        retry_transient=True,
-                    )
-                except Exception as exc:
-                    if not scan_gap(exc):
-                        raise
-                    log.debug("Scan gap at %s: %s", message_id, exc)
-                else:
-                    try:
+            while cursor < max_id - 1:
+                batch = range(cursor + 1, min(cursor + 1 + self.batch, max_id))
+                semaphore = asyncio.Semaphore(self.concurrency)
+                results = await asyncio.gather(
+                    *(
+                        self.forward_message(vault_chat_id, message_id, semaphore)
+                        for message_id in batch
+                    ),
+                    return_exceptions=True,
+                )
+                forwarded: list[int] = []
+                error: BaseException | None = None
+                for message_id, result in zip(batch, results):
+                    if isinstance(result, BaseException):
+                        error = error or result
+                    elif result is not None:
                         self.index_channel_post(
-                            forwarded,
+                            result,
                             vault_chat_id=vault_chat_id,
                             message_id=message_id,
                         )
-                    finally:
-                        await retry_telegram(
-                            self.bot.delete_message,
-                            self.owner_id,
-                            forwarded.message_id,
-                            retry_transient=True,
-                        )
-                self.db.set_setting("scan_cursor", message_id)
+                        forwarded.append(result.message_id)
+                # Clean up before advancing: resume never skips an uncleaned copy.
+                # shortcut: a crash mid-batch leaves up to self.batch forwarded
+                # copies in the DM; persist forwarded ids before cleanup if that
+                # ever matters.
+                if forwarded:
+                    await retry_telegram(
+                        self.bot.delete_messages,
+                        self.owner_id,
+                        forwarded,
+                        retry_transient=True,
+                    )
+                if error is not None:
+                    raise error
+                cursor = batch[-1]
+                self.db.set_setting("scan_cursor", cursor)
                 await asyncio.sleep(self.delay)
             self.db.set_setting("scan_state", "done")
             self.db.set_setting("scan_error", "")

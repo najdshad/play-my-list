@@ -672,8 +672,13 @@ describe("durable vault scanning", () => {
       })),
     ).toEqual({ state: "done", cursor: "3" });
     expect(
+      calls
+        .filter((c) => c.method === "deleteMessages" && c.chat_id === 7)
+        .map((c) => c.message_ids),
+    ).toEqual([[4, 5]]);
+    expect(
       calls.filter((c) => c.method === "deleteMessage" && c.chat_id === 7),
-    ).toHaveLength(2);
+    ).toHaveLength(0);
     await command("/setvault", 1);
     await command("", 2, {
       forward_origin: { chat: { id: -9002, type: "channel" }, message_id: 4 },
@@ -700,8 +705,9 @@ describe("durable vault scanning", () => {
     expect(
       calls.filter(
         (c) =>
-          ["sendMessage", "deleteMessage"].includes(c.method) &&
-          c.chat_id === -9002,
+          ["sendMessage", "deleteMessage", "deleteMessages"].includes(
+            c.method,
+          ) && c.chat_id === -9002,
       ),
     ).toEqual([]);
   });
@@ -737,15 +743,13 @@ describe("durable vault scanning", () => {
   it("retains forwarded message cleanup across failures and eviction", async () => {
     nextMessage = 1;
     fail = (method, input) =>
-      method === "deleteMessage" && input.chat_id === 7
+      method === "deleteMessages" && input.chat_id === 7
         ? new Error("offline")
         : null;
     await inside((app) => app.startScan(-9001, true, 1));
     await drain();
     expect(await inside((app) => app.db.setting("scan_cursor"))).toBe("0");
-    expect(
-      await inside((app) => JSON.parse(app.db.setting("scan_resume")).phase),
-    ).toBe("delete_forward");
+    expect(await inside((app) => app.db.setting("scan_pending"))).toBe("[2]");
     fail = null;
     await command("/resumescan");
     await inside((app) => {
@@ -758,7 +762,9 @@ describe("durable vault scanning", () => {
     });
     await drain();
     expect(await inside((app) => app.db.setting("scan_state"))).toBe("done");
-    expect(calls.filter((c) => c.method === "forwardMessage")).toHaveLength(1);
+    expect(await inside((app) => app.db.setting("scan_cursor"))).toBe("1");
+    expect(await inside((app) => app.db.setting("scan_pending"))).toBe("[]");
+    expect(calls.filter((c) => c.method === "forwardMessage")).toHaveLength(2);
   }, 20000);
 
   it("rejects protected vaults without changing the selected vault", async () => {

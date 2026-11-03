@@ -94,7 +94,7 @@ Python runtime, via `.env`:
 | `WEB_APP_HOST` | `0.0.0.0` | Bind address |
 | `WEB_APP_PORT` | `8080` | Bind port |
 | `PUBLISH_DELAY_SECONDS` | `3.0` | Pause between published tracks (~20 messages/min) |
-| `SCAN_DELAY_SECONDS` | `1.0` | Pause between scan forwards (~1 message/s) |
+| `SCAN_DELAY_SECONDS` | `1.0` | Pause between scan batches (100 messages each) |
 | `LOG_LEVEL` | `INFO` | Logging level |
 
 Telegram 429 responses are always honored via `retry_after`, so these delays are floors, not guarantees. Cloudflare configuration lives in `wrangler.jsonc` and Worker secrets; see the [Cloudflare guide](cloudflare/README.md).

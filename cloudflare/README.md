@@ -2,7 +2,7 @@
 
 The Mini App, REST API, Telegram webhook, database, and background jobs run on Cloudflare. No Python process, VPS, tunnel, D1 database, or audio storage is needed for this deployment.
 
-The Worker serves the existing `miniapp/` assets and authenticates API requests using Telegram's signed `initData`. One SQLite-backed Durable Object holds the owner's playlists, tracks, channel permissions, message tracking, webhook deduplication records, and pending work. Durable Object alarms advance scans and publishes one Telegram request at a time. Delays and flood waits are persisted instead of sleeping in a request handler.
+The Worker serves the existing `miniapp/` assets and authenticates API requests using Telegram's signed `initData`. One SQLite-backed Durable Object holds the owner's playlists, tracks, channel permissions, message tracking, webhook deduplication records, and pending work. Durable Object alarms advance scans and publishes; scans forward a short batch per alarm and clean each batch with one `deleteMessages` call, while publishing keeps one Telegram request per step. Delays and flood waits are persisted instead of sleeping in a request handler.
 
 ## Current deployment
 
@@ -110,11 +110,11 @@ npx wrangler tail
 npm run telegram:status
 ```
 
-Send `/cancel` to stop any running scan or publish. Cancelling a publish keeps its already-posted messages tracked, so publishing again cleans them up; cancelling a scan may leave a temporary forwarded copy in the bot chat.
+Send `/cancel` to stop any running scan or publish. Cancelling a publish keeps its already-posted messages tracked, so publishing again cleans them up; cancelling a scan may leave a batch of temporary forwarded copies in the bot chat, which the next scan deletes before continuing.
 
 The database and pending tasks survive Worker requests, eviction, and deployments. Do not delete the Durable Object namespace or change the owner ID/name mapping to reset the app: that selects a different database. The deployment migration creates storage; future schema changes require a migration rather than dropping tables.
 
-Scan failures retain their cursor and any confirmed forwarded-message ID awaiting cleanup. Use `/resumescan` to continue, or `/rescan` to restart from the beginning. Permission failures never become skipped message IDs.
+Scan failures retain their cursor, and a batch's confirmed forwarded-message IDs stay in `scan_pending` until they are deleted. Use `/resumescan` to continue, or `/rescan` to restart from the beginning. Permission failures never become skipped message IDs.
 
 Publish failures preserve tracked output. Retry publishing to clean up partial posts first. If old posts cannot be deleted, remove them manually in Telegram and retry. The bot cannot bypass Telegram's deletion limits.
 

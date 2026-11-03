@@ -37,7 +37,8 @@ async def test_scan_gaps_and_live_upsert(db, bot):
     assert scanner.index_channel_post(message) == track["id"]
     assert db.fetchone("SELECT vault_message_id FROM tracks")["vault_message_id"] == 10
     assert len(db.fetchall("SELECT * FROM tracks")) == 1
-    assert bot.delete_message.await_count == 3  # probe, audio forward, nonaudio forward
+    bot.delete_messages.assert_awaited_once_with(7, [8, 9])
+    bot.delete_message.assert_awaited_once()  # probe only
 
 
 async def test_temporary_failure_retries_same_id(db, bot, no_retry_wait):
@@ -62,16 +63,32 @@ async def test_exhausted_failure_retains_cursor_and_resumes(db, bot, no_retry_wa
     scanner.start(-9001)
     await scanner.task
     assert scanner.status()["state"] == "error"
-    assert scanner.status()["cursor"] == 1
+    assert scanner.status()["cursor"] == 0
     assert "offline" in scanner.status()["error"]
     bot.forward_message.reset_mock(side_effect=True)
-    bot.forward_message.return_value = forwarded(unique="resumed")
+    bot.forward_message.side_effect = lambda *args: forwarded(unique="resumed")
     # The error notification shares send_message; reset the probe's ID explicitly.
     bot.send_message.return_value.message_id = 4
     scanner.start(-9001)
     await scanner.task
-    assert [call.args[2] for call in bot.forward_message.await_args_list] == [2, 3]
+    assert [call.args[2] for call in bot.forward_message.await_args_list] == [1, 2, 3]
     assert scanner.status()["state"] == "done"
+
+
+async def test_scan_cleans_each_batch_with_one_delete_call(db, bot):
+    bot.forward_message.side_effect = lambda owner, vault, mid: forwarded(
+        mid=100 + mid, unique=str(mid)
+    )
+    scanner = Scanner(bot, db, 7, 0)
+    scanner.batch = 2
+    scanner.start(-9001)
+    await scanner.task
+    assert scanner.status()["cursor"] == 3
+    assert [call.args[1] for call in bot.delete_messages.await_args_list] == [
+        [101, 102],
+        [103],
+    ]
+
 
 
 async def test_permission_error_is_not_a_gap(db, bot):
@@ -88,8 +105,8 @@ async def test_permission_error_is_not_a_gap(db, bot):
 
 
 async def test_dm_cleanup_failure_does_not_advance_cursor(db, bot):
-    bot.forward_message.return_value = forwarded()
-    bot.delete_message.side_effect = [True, RuntimeError("cannot clean up DM")]
+    bot.forward_message.side_effect = lambda *args: forwarded()
+    bot.delete_messages.side_effect = RuntimeError("cannot clean up DM")
     scanner = Scanner(bot, db, 7, 0)
     scanner.start(-9001)
     await scanner.task

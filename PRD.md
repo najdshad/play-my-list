@@ -45,13 +45,13 @@ This bot lets a single owner build ordered music playlists and publish them as c
 1. The owner sends `/setvault`, then forwards any message from the vault channel.
 2. The bot reads the channel ID from `forward_origin` and uses `getChatMember` to check its admin rights. It saves `vault_chat_id` in `settings`.
 3. **Finding the newest message ID:** the bot posts a temporary message in the vault, records its `message_id` as `scan_max_id`, and deletes it right away.
-4. **Forward-probe loop**, for each ID from `scan_cursor + 1` to `scan_max_id`:
-   - The bot calls `forwardMessage(vault → owner DM, id)`.
-   - If the forward contains `audio`, the bot saves or updates the track by `file_unique_id`.
-   - The forwarded copy is deleted from the DM straight away.
+4. **Forward-probe loop**, in batches of up to 100 IDs from `scan_cursor + 1` to `scan_max_id`:
+   - The bot forwards up to 3 messages concurrently with `forwardMessage(vault → owner DM, id)`.
+   - If a forward contains `audio`, the bot saves or updates the track by `file_unique_id`.
+   - The batch's forwarded copies are deleted from the DM with one `deleteMessages` call.
    - If the message is missing or can't be forwarded (deleted, or a service message), the bot treats it as a gap and moves on.
-   - `scan_cursor` is saved after every successfully processed ID or confirmed gap. Temporary failures are retried with a bounded backoff; exhausted retries or permission failures stop scanning without advancing past the failed ID. Interrupted scans resume on startup; `/resumescan` resumes failed scans.
-   - The loop waits `SCAN_DELAY_SECONDS` between calls and honors `RetryAfter`.
+   - `scan_cursor` is saved after each batch, and only after its copies are cleaned up; a failure re-processes at most one batch. Temporary failures are retried with a bounded backoff; exhausted retries or permission failures stop scanning without advancing the cursor. Interrupted scans resume on startup; `/resumescan` resumes failed scans.
+   - The loop waits `SCAN_DELAY_SECONDS` between batches and honors `RetryAfter`.
 5. The scan runs in the background. `/scanstatus` shows `cursor / max` and how many tracks are indexed.
 6. **Live indexing:** a `channel_post` handler indexes new audio as soon as it's posted to the vault.
 7. `/rescan` resets `scan_cursor` to 0 and scans everything again. Existing tracks are updated in place, never duplicated.
@@ -97,6 +97,7 @@ This bot lets a single owner build ordered music playlists and publish them as c
 | `scan_cursor` | Last vault message ID processed |
 | `scan_max_id` | Highest message ID found by the probe |
 | `scan_state` | `idle` / `running` / `done` / `error` |
+| `scan_pending` | Forwarded DM message IDs awaiting batch cleanup (Worker only) |
 
 ### `channels`
 | Column | Type | Notes |
@@ -232,10 +233,10 @@ Errors use the shape `{error, code}`, with status 400 (invalid input), 401 (fail
 | Item | Limit / Behavior |
 |---|---|
 | Posting to a channel | About 20 messages/min. The default `PUBLISH_DELAY_SECONDS` is 3.0. |
-| Forwarding to the owner's DM (scan) | About 1 message/s. The default `SCAN_DELAY_SECONDS` is 1.0. |
+| Forwarding to the owner's DM (scan) | 100 messages per batch (Python) or 10 per Worker alarm. The default `SCAN_DELAY_SECONDS` is 1.0 between batches. |
 | 429 errors | The bot always waits for the `retry_after` period, then retries |
 | `deleteMessages` | Up to 100 IDs per call |
-| Rough timings | A 1,000-message vault takes about 17 minutes to scan. A 50-track playlist takes about 2.5 minutes to publish. |
+| Rough timings | A 1,000-message vault takes about 1–2 minutes to scan on the Python bot and 5–6 minutes on the Worker. A 50-track playlist takes about 2.5 minutes to publish. |
 
 ## 12. Error Handling
 

@@ -15,8 +15,11 @@ import {
   scanGap,
   sourceUnavailable,
   invalidAudio,
-  matches,
 } from "./telegram.js";
+
+// Forwards are sequential inside one alarm; keep each alarm short and let the
+// next batch continue after SCAN_DELAY_SECONDS.
+const SCAN_BATCH = 10;
 
 export class PlaylistApp extends DurableObject {
   constructor(ctx, env) {
@@ -852,62 +855,64 @@ export class PlaylistApp extends DurableObject {
     });
   }
 
+  async flushForwarded(task, owner) {
+    const pending = JSON.parse(this.db.setting("scan_pending", "[]"));
+    if (!pending.length) return;
+    await this.call(task, "deleteMessages", {
+      chat_id: owner,
+      message_ids: pending,
+    });
+    this.db.set("scan_pending", "[]");
+  }
+
   async scanStep(task, payload) {
     const owner = Number(this.env.OWNER_ID);
     const delay = Number(this.env.SCAN_DELAY_SECONDS ?? 1) * 1000;
-    const next = (changes, wait = 0) =>
-      this.db.updateTask(task, { ...payload, ...changes }, wait);
-    if (payload.phase === "delete_forward") {
+    await this.flushForwarded(task, owner);
+    const max = Number(payload.max ?? this.db.setting("scan_max_id", "0"));
+    const cursor = Number(this.db.setting("scan_cursor", "0"));
+    const end = Math.min(max, cursor + SCAN_BATCH);
+    const forwarded = [];
+    let failure = null;
+    // shortcut: a crash mid-batch leaves up to SCAN_BATCH copies in the DM.
+    for (let message = cursor + 1; message <= end; message++) {
+      let sent;
       try {
-        await this.call(task, "deleteMessage", {
-          chat_id: owner,
-          message_id: payload.forwarded,
-        });
+        sent = await this.call(
+          task,
+          "forwardMessage",
+          { chat_id: owner, from_chat_id: payload.vault, message_id: message },
+          true,
+        );
       } catch (error) {
-        if (!matches(error, "message to delete not found")) throw error;
+        if (!scanGap(error)) {
+          failure = error;
+          break;
+        }
+        continue;
       }
-      this.db.atomic(() => {
-        this.db.set("scan_cursor", payload.message);
-        next({ phase: "forward", forwarded: null }, delay);
-        this.db.set("bot_not_before", Date.now() + delay);
-      });
-      return;
+      this.db.index(sent, payload.vault, message);
+      forwarded.push(sent.message_id);
     }
-    const message = Number(this.db.setting("scan_cursor", "0")) + 1;
-    if (message > Number(payload.max ?? this.db.setting("scan_max_id", "0"))) {
-      this.db.atomic(() => {
+    if (forwarded.length) this.db.set("scan_pending", JSON.stringify(forwarded));
+    // The forwards landed; a failed cleanup must retry as cleanup, not as an
+    // ambiguous send.
+    this.db.exec("UPDATE tasks SET inflight=NULL WHERE id=?", task.id);
+    await this.flushForwarded(task, owner);
+    if (failure) throw failure;
+    this.db.atomic(() => {
+      this.db.set("scan_cursor", String(end));
+      if (end >= max) {
         this.db.exec("DELETE FROM tasks WHERE id=?", task.id);
         this.db.set("scan_state", "done");
         this.db.set("scan_error", "");
         this.notify(
           `Vault scan finished. Indexed ${this.db.one("SELECT COUNT(*) n FROM tracks WHERE vault_chat_id=?", payload.vault).n} tracks.`,
         );
-      });
-      return;
-    }
-    let forwarded;
-    try {
-      forwarded = await this.call(
-        task,
-        "forwardMessage",
-        { chat_id: owner, from_chat_id: payload.vault, message_id: message },
-        true,
-      );
-    } catch (error) {
-      if (!scanGap(error)) throw error;
-      this.db.atomic(() => {
-        this.db.set("scan_cursor", message);
-        next({}, delay);
-      });
-      return;
-    }
-    this.db.atomic(() => {
-      this.db.index(forwarded, payload.vault, message);
-      next({
-        phase: "delete_forward",
-        forwarded: forwarded.message_id,
-        message,
-      });
+        return;
+      }
+      this.db.updateTask(task, payload, delay);
+      this.db.set("bot_not_before", Date.now() + delay);
     });
   }
 }

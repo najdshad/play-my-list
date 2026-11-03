@@ -85,7 +85,9 @@ def bot():
     fake.send_message = AsyncMock(return_value=SimpleNamespace(message_id=4))
     fake.edit_message_text = AsyncMock(return_value=True)
     fake.forward_message = AsyncMock(
-        return_value=SimpleNamespace(message_id=8, audio=None)
+        side_effect=[
+            SimpleNamespace(message_id=i, audio=None) for i in range(8, 10008)
+        ]
     )
     return fake
 
