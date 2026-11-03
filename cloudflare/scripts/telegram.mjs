@@ -12,6 +12,7 @@ const commands = [
   { command: "newplaylist", description: "Create a playlist by name" },
   { command: "list", description: "List playlists" },
   { command: "publish", description: "Publish a playlist by name" },
+  { command: "cancel", description: "Cancel running scans and publishing" },
 ];
 
 async function call(method, parameters = {}) {

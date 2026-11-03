@@ -601,6 +601,56 @@ describe("playlist API and durable publishing", () => {
   });
 });
 
+describe("cancelling work", () => {
+  it("cancels running scans and publishes", async () => {
+    const id = await seed();
+    await inside((app) => app.startScan(-9001, true, 3));
+    const { job_id } = await api(
+      "POST",
+      `/playlists/${id}/publish`,
+      undefined,
+      202,
+    );
+    await command("/cancel");
+    expect(await inside((app) => app.db.setting("scan_state"))).toBe("idle");
+    expect(
+      await inside(
+        (app) =>
+          app.db.one("SELECT status FROM jobs WHERE id=?", job_id).status,
+      ),
+    ).toBe("cancelled");
+    expect(
+      await inside(
+        (app) =>
+          app.db.one(
+            "SELECT COUNT(*) n FROM tasks WHERE kind IN ('scan','publish')",
+          ).n,
+      ),
+    ).toBe(0);
+    expect(
+      await inside((app) => app.db.one("SELECT COUNT(*) n FROM channel_locks").n),
+    ).toBe(0);
+    await drain();
+    expect(
+      calls.some(
+        (c) =>
+          c.method === "sendMessage" &&
+          c.text.includes("Cancelled all running work"),
+      ),
+    ).toBe(true);
+  });
+
+  it("reports when nothing is running", async () => {
+    await command("/cancel");
+    await drain();
+    expect(
+      calls.some(
+        (c) => c.method === "sendMessage" && c.text === "Nothing to cancel.",
+      ),
+    ).toBe(true);
+  });
+});
+
 describe("durable vault scanning", () => {
   it("validates a forwarded vault, indexes audio, skips gaps and cleans DMs", async () => {
     nextMessage = 3;

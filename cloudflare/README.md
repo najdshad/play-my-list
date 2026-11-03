@@ -110,6 +110,8 @@ npx wrangler tail
 npm run telegram:status
 ```
 
+Send `/cancel` to stop any running scan or publish. Cancelling a publish keeps its already-posted messages tracked, so publishing again cleans them up; cancelling a scan may leave a temporary forwarded copy in the bot chat.
+
 The database and pending tasks survive Worker requests, eviction, and deployments. Do not delete the Durable Object namespace or change the owner ID/name mapping to reset the app: that selects a different database. The deployment migration creates storage; future schema changes require a migration rather than dropping tables.
 
 Scan failures retain their cursor and any confirmed forwarded-message ID awaiting cleanup. Use `/resumescan` to continue, or `/rescan` to restart from the beginning. Permission failures never become skipped message IDs.

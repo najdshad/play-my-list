@@ -292,6 +292,40 @@ export class PlaylistApp extends DurableObject {
     });
   }
 
+  cancel() {
+    const tasks = this.db.all("SELECT kind,inflight FROM tasks");
+    const jobs = this.db.all("SELECT id FROM jobs WHERE status='running'");
+    const scanning = this.db.setting("scan_state") === "running";
+    const pending = this.db.setting("pending_vault") === "1";
+    if (!tasks.length && !jobs.length && !scanning && !pending) {
+      this.notify("Nothing to cancel.");
+      return;
+    }
+    this.db.atomic(() => {
+      jobs.forEach((job) => {
+        this.db.exec(
+          "UPDATE jobs SET status='cancelled',error=?,current_track=NULL,updated_at=? WHERE id=?",
+          "Cancelled.",
+          now(),
+          job.id,
+        );
+        this.db.exec("DELETE FROM channel_locks WHERE job_id=?", job.id);
+      });
+      this.db.exec("DELETE FROM tasks");
+      if (scanning) {
+        this.db.set("scan_state", "idle");
+        this.db.set("scan_error", "");
+      }
+      this.db.set("pending_vault", "0");
+    });
+    const interrupted = tasks.find(
+      (task) => task.inflight && task.kind !== "notification",
+    );
+    this.notify(
+      `Cancelled all running work.${interrupted ? ` An interrupted ${interrupted.inflight} request may have been accepted by Telegram; check the channel.` : ""}`,
+    );
+  }
+
   scanBusy() {
     return !!this.db.one(
       "SELECT 1 FROM tasks WHERE kind IN ('scan','select_vault')",
@@ -417,6 +451,9 @@ export class PlaylistApp extends DurableObject {
           this.startPublish(row.id);
           return;
         }
+        case "/cancel":
+          this.cancel();
+          return;
       }
       if (message.forward_origin && this.db.setting("pending_vault") === "1") {
         const chat = message.forward_origin.chat;
