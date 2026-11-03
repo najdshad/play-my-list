@@ -26,7 +26,7 @@ These credentials are for deployment only. `BOT_TOKEN` and `WEBHOOK_SECRET` rema
 - Node.js 22+ and npm.
 - A Cloudflare account with Workers and SQLite-backed Durable Objects enabled. Check your account's current limits and billing before deploying.
 - A Telegram bot token and your numeric Telegram user ID.
-- A vault channel and at least one separate publish channel. Make the bot an administrator of the vault (read and forward only; no Post or Delete permissions are needed) and give it Post Messages and Delete Messages in publish channels. Disable Restrict Saving Content in the vault.
+- A vault channel and at least one separate publish channel. Make the bot an administrator of the vault (Post Messages and Delete Messages are needed for automatic synchronization) and give it Post Messages and Delete Messages in publish channels. Disable Restrict Saving Content in the vault.
 
 ## First deployment
 
@@ -114,7 +114,7 @@ Send `/cancel` to stop any running scan or publish. Cancelling a publish keeps i
 
 The database and pending tasks survive Worker requests, eviction, and deployments. Do not delete the Durable Object namespace or change the owner ID/name mapping to reset the app: that selects a different database. The deployment migration creates storage; future schema changes require a migration rather than dropping tables.
 
-Use `/syncvault` to check for new tracks: forward the newest message from the configured vault when prompted. Forwards from other channels are rejected. Synchronization starts after that vault's persistent coverage checkpoint, including previously checked gaps and non-audio messages. Matching tracks already indexed from live channel updates are reused within the new range. A high live message ID alone never advances coverage. The forwarded upper bound stays fixed for that run.
+Use `/syncvault` to check for new tracks without forwarding another message. The bot briefly posts and deletes a message in the vault to determine the latest message ID; it needs Post Messages and Delete Messages permissions there. Synchronization starts after that vault's persistent coverage checkpoint, including previously checked gaps and non-audio messages. Matching tracks already indexed from live channel updates are reused within the new range. A high live message ID alone never advances coverage. The upper bound stays fixed for that run.
 
 Use `/rescan` for a full metadata refresh, including cached tracks, or `/resumescan` for recovery. Each confirmed forward atomically saves metadata, cleanup IDs, cursor progress, and the cleared in-flight marker. Scan failures retain this progress; confirmed forwarded-message IDs stay in `scan_pending` until deletion succeeds. Permission failures never become skipped message IDs. After an ambiguous forward, inspect the DM and remove any untracked extra copy before explicitly resuming.
 

@@ -9,7 +9,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index.js";
 import { hmac } from "../src/auth.js";
 
-let calls, fail, nextMessage, authorization, stub;
+let calls, fail, nextMessage, vaultMarker, authorization, stub;
 
 async function signed({
   owner = 7,
@@ -137,6 +137,7 @@ beforeEach(async () => {
   calls = [];
   fail = null;
   nextMessage = 100;
+  vaultMarker = 1;
   authorization = await signed();
   stub = env.PLAYLISTS.get(env.PLAYLISTS.idFromName("owner:7"));
   vi.spyOn(console, "log").mockImplementation(() => {});
@@ -163,7 +164,7 @@ beforeEach(async () => {
     if (method === "getChat")
       result = { id: input.chat_id, type: "channel", title: "Vault" };
     if (["sendAudio", "copyMessage", "sendMessage"].includes(method))
-      result = { message_id: ++nextMessage };
+      result = { message_id: method === "sendMessage" && input.chat_id === -9001 ? vaultMarker : ++nextMessage };
     if (method === "forwardMessage")
       result = {
         message_id: ++nextMessage,
@@ -821,25 +822,30 @@ describe("durable vault scanning", () => {
 });
 
 async function syncTo(max, update = 100) {
+  vaultMarker = max + 1;
   await command("/syncvault", update);
-  await command("", update + 1, {
-    forward_origin: { chat: { id: -9001, type: "channel" }, message_id: max },
-  });
+  for (let i = 0; i < 10 && !(await inside((app) => app.db.one("SELECT 1 FROM tasks WHERE kind='scan'"))); i++) await step();
 }
 
 describe("incremental synchronization", () => {
-  it("requires the configured vault and rejects another channel's bound", async () => {
+  it("requires a vault and starts without a forwarded message", async () => {
     await command("/syncvault");
-    expect(await inside((app) => app.db.setting("pending_sync"))).toBe(null);
     await inside((app) => app.db.set("vault_chat_id", -9001));
-    await command("/syncvault", 2);
-    await command("", 3, {
-      forward_origin: { chat: { id: -9002, type: "channel" }, message_id: 20 },
-    });
-    expect(await inside((app) => app.scanBusy())).toBe(false);
-    expect(await inside((app) => app.db.setting("pending_sync"))).toBe("1");
+    await syncTo(2, 2);
     await drain();
-    expect(calls.some((c) => c.text?.includes("configured vault channel"))).toBe(true);
+    expect(calls.some((c) => c.method === "sendMessage" && c.chat_id === -9001)).toBe(true);
+    expect(calls.some((c) => c.method === "deleteMessage" && c.chat_id === -9001 && c.message_id === 3)).toBe(true);
+    expect(await inside((app) => app.db.checkpoint(-9001))).toBe(2);
+  });
+
+  it("reports missing vault permissions without starting a scan", async () => {
+    await inside((app) => app.db.set("vault_chat_id", -9001));
+    fail = (method, input) => method === "sendMessage" && input.chat_id === -9001
+      ? { error_code: 403, description: "not enough rights" } : null;
+    await command("/vaultsync");
+    await drain();
+    expect(await inside((app) => app.scanBusy())).toBe(false);
+    expect(calls.some((c) => c.chat_id === 7 && c.text?.includes("Post Messages and Delete Messages"))).toBe(true);
   });
 
   it("covers gaps and non-audio, reuses live audio, and keeps a fixed bound", async () => {

@@ -375,7 +375,7 @@ export class PlaylistApp extends DurableObject {
 
   scanBusy() {
     return !!this.db.one(
-      "SELECT 1 FROM tasks WHERE kind IN ('scan','select_vault')",
+      "SELECT 1 FROM tasks WHERE kind IN ('scan','select_vault','sync_bound')",
     );
   }
 
@@ -475,6 +475,7 @@ export class PlaylistApp extends DurableObject {
             "Forward the newest message from the vault channel to me.",
           );
           return;
+        case "/vaultsync":
         case "/syncvault":
           if (!this.db.setting("vault_chat_id"))
             throw new AppError("Set a vault first with /setvault.");
@@ -483,8 +484,9 @@ export class PlaylistApp extends DurableObject {
           if (this.db.setting("scan_state") === "error")
             throw new AppError("Recover the failed scan with /resumescan first, or use /rescan for a full refresh.");
           this.db.set("pending_vault", "0");
-          this.db.set("pending_sync", "1");
-          this.notify("Forward the newest message from the configured vault to check for new tracks.");
+          this.db.set("pending_sync", "0");
+          this.db.enqueue("sync_bound", { vault: Number(this.db.setting("vault_chat_id")), phase: "post" });
+          this.notify("Preparing vault synchronization. Use /scanstatus for progress.");
           return;
         case "/scanstatus":
           this.notify(
@@ -697,6 +699,8 @@ export class PlaylistApp extends DurableObject {
         else if (task.kind === "scan") await this.scanStep(task, payload);
         else if (task.kind === "select_vault")
           await this.selectVaultStep(task, payload);
+        else if (task.kind === "sync_bound")
+          await this.syncBoundStep(task, payload);
         else if (task.kind === "notification") {
           await this.call(task, "sendMessage", payload, true);
           this.db.exec("DELETE FROM tasks WHERE id=?", task.id);
@@ -760,6 +764,8 @@ export class PlaylistApp extends DurableObject {
           );
         } else if (task.kind === "select_vault")
           this.notify(`Could not set the vault: ${message}`);
+        else if (task.kind === "sync_bound")
+          this.notify(`Could not synchronize the vault: ${message} The bot needs Post Messages and Delete Messages permission in the vault. If a temporary message remains, delete it and retry /syncvault.`);
         // Do not retry a notification with an ambiguous result or create a loop.
       }
     });
@@ -929,6 +935,24 @@ export class PlaylistApp extends DurableObject {
         this.notify(
           `Publishing ${state.name}: ${job.progress + 1}/${job.total}, skipped ${titles.length}`,
         );
+    });
+  }
+
+  async syncBoundStep(task, payload) {
+    if (payload.phase === "post") {
+      const sent = await this.call(task, "sendMessage", {
+        chat_id: payload.vault, text: "Preparing vault synchronization…",
+      }, true);
+      this.db.updateTask(task, { ...payload, phase: "delete", marker: sent.message_id });
+      return;
+    }
+    await this.call(task, "deleteMessage", {
+      chat_id: payload.vault, message_id: payload.marker,
+    });
+    this.db.atomic(() => {
+      this.db.exec("DELETE FROM tasks WHERE id=?", task.id);
+      this.startScan(payload.vault, false, payload.marker - 1, "sync");
+      this.notify("Vault synchronization started. Use /scanstatus for progress.");
     });
   }
 
