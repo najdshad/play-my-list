@@ -226,17 +226,16 @@ export class PlaylistApp extends DurableObject {
         return json({ ok: true });
       }
       if (method === "DELETE") {
-        if (
-          this.db.one(
-            "SELECT 1 FROM published_messages WHERE playlist_id=?",
-            row.id,
-          )
-        )
+        try {
+          while (await this.clearPublished(null, row.id));
+        } catch (error) {
+          if (!(error instanceof TelegramError)) throw error;
           throw new AppError(
-            "Remove all tracks and publish the empty playlist to clear its previous posts before deleting it.",
+            `Could not delete this playlist's posts: ${error.message || error} Telegram normally allows deletion only within 48 hours. Check Delete Messages permission; if the posts are too old, delete them manually in Telegram, then try again. Their tracking has been retained.`,
             409,
             "published_messages_remain",
           );
+        }
         this.db.exec("DELETE FROM playlists WHERE id=?", row.id);
         return json({ ok: true });
       }
@@ -681,6 +680,33 @@ export class PlaylistApp extends DurableObject {
     );
   }
 
+  async clearPublished(task, playlistId, save = () => {}) {
+    const first = this.db.one(
+      "SELECT chat_id FROM published_messages WHERE playlist_id=? ORDER BY id LIMIT 1",
+      playlistId,
+    );
+    if (!first) return false;
+    const batch = this.db.all(
+      "SELECT id,message_id FROM published_messages WHERE playlist_id=? AND chat_id=? ORDER BY id LIMIT 100",
+      playlistId,
+      first.chat_id,
+    );
+    const parameters = {
+      chat_id: first.chat_id,
+      message_ids: batch.map((r) => r.message_id),
+    };
+    if (task) await this.call(task, "deleteMessages", parameters);
+    else await telegram(this.env.BOT_TOKEN, "deleteMessages", parameters);
+    this.db.atomic(() => {
+      this.db.exec(
+        `DELETE FROM published_messages WHERE id IN (${batch.map(() => "?").join(",")})`,
+        ...batch.map((r) => r.id),
+      );
+      save();
+    });
+    return true;
+  }
+
   async publishStep(task, payload) {
     const job = this.db.one("SELECT * FROM jobs WHERE id=?", payload.job);
     if (!job || job.status !== "running") {
@@ -722,31 +748,10 @@ export class PlaylistApp extends DurableObject {
       return;
     }
     if (state.phase === "clear") {
-      const first = this.db.one(
-        "SELECT chat_id FROM published_messages WHERE playlist_id=? ORDER BY id LIMIT 1",
-        job.playlist_id,
-      );
-      if (!first) {
+      if (!(await this.clearPublished(task, job.playlist_id, save))) {
         state.phase = "send";
         save();
-        return;
       }
-      const batch = this.db.all(
-        "SELECT id,message_id FROM published_messages WHERE playlist_id=? AND chat_id=? ORDER BY id LIMIT 100",
-        job.playlist_id,
-        first.chat_id,
-      );
-      await this.call(task, "deleteMessages", {
-        chat_id: first.chat_id,
-        message_ids: batch.map((r) => r.message_id),
-      });
-      this.db.atomic(() => {
-        this.db.exec(
-          `DELETE FROM published_messages WHERE id IN (${batch.map(() => "?").join(",")})`,
-          ...batch.map((r) => r.id),
-        );
-        save();
-      });
       return;
     }
     if (job.progress >= job.total) {

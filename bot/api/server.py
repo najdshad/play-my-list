@@ -170,14 +170,15 @@ class API:
 
     async def delete_playlist(self, request):
         row = self._playlist(request, editable=True)
-        if self.db.fetchone(
-            "SELECT 1 FROM published_messages WHERE playlist_id=?", (row["id"],)
-        ):
-            raise APIError(
-                "Remove all tracks and publish the empty playlist to clear its previous posts before deleting it.",
-                "published_messages_remain",
-                409,
-            )
+        try:
+            if self.publisher:
+                await self.publisher.clear_playlist(row["id"])
+            elif self.db.fetchone(
+                "SELECT 1 FROM published_messages WHERE playlist_id=?", (row["id"],)
+            ):
+                raise APIError("Publisher unavailable.", "unavailable", 503)
+        except RuntimeError as exc:
+            raise APIError(str(exc), "published_messages_remain", 409) from exc
         self.db.execute("DELETE FROM playlists WHERE id=?", (row["id"],))
         return web.json_response({"ok": True})
 

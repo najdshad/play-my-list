@@ -338,16 +338,45 @@ describe("playlist API and durable publishing", () => {
       calls.filter((c) => c.method === "copyMessage").map((c) => c.message_id),
     ).toEqual([3, 1, 2]);
     expect((await api("GET", `/jobs/${job_id}`)).status).toBe("done");
-    await api("DELETE", `/playlists/${id}`, undefined, 409);
-    await api("POST", `/playlists/${id}/publish`, undefined, 202);
-    await drain();
-    expect(calls.filter((c) => c.method === "deleteMessages")).toHaveLength(1);
     for (let i = 1; i <= 3; i++)
       await api("DELETE", `/playlists/${id}/tracks/${i}`);
     await api("POST", `/playlists/${id}/publish`, undefined, 202);
     await drain();
+    expect(calls.filter((c) => c.method === "deleteMessages")).toHaveLength(1);
     await api("DELETE", `/playlists/${id}`);
     expect(await api("GET", "/playlists")).toEqual([]);
+  });
+
+  it("deletes a playlist and its published posts", async () => {
+    const id = await seed();
+    await api("POST", `/playlists/${id}/publish`, undefined, 202);
+    await drain();
+    await api("DELETE", `/playlists/${id}`);
+    expect(await api("GET", "/playlists")).toEqual([]);
+    expect(calls.filter((c) => c.method === "deleteMessages")).toHaveLength(1);
+    expect(
+      await inside(
+        (app) => app.db.one("SELECT COUNT(*) n FROM published_messages").n,
+      ),
+    ).toBe(0);
+  });
+
+  it("keeps a playlist when its published posts cannot be deleted", async () => {
+    const id = await seed();
+    await api("POST", `/playlists/${id}/publish`, undefined, 202);
+    await drain();
+    fail = (method) =>
+      method === "deleteMessages"
+        ? { error_code: 400, description: "message can't be deleted" }
+        : null;
+    const { error } = await api("DELETE", `/playlists/${id}`, undefined, 409);
+    expect(error).toContain("48 hours");
+    await api("GET", `/playlists/${id}`);
+    expect(
+      await inside(
+        (app) => app.db.one("SELECT COUNT(*) n FROM published_messages").n,
+      ),
+    ).toBe(3);
   });
 
   it.each(

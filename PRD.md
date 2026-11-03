@@ -69,6 +69,7 @@ This bot lets a single owner build ordered music playlists and publish them as c
 2. The owner picks a channel for it in the Mini App (from `channels`).
 3. The owner searches the vault index, adds or removes tracks, and drags them into order.
 4. Every change is saved immediately. Reorders are saved in one transaction: the playlist's positions are deleted and rewritten, which avoids clashes under `UNIQUE(playlist_id, position)`.
+5. Deleting a playlist deletes its tracked `published_messages` first, then removes the playlist. If cleanup fails, the playlist stays with its tracking retained so the deletion can be retried.
 
 ### 5.4 Publish
 1. The owner taps **Publish** in the Mini App or sends `/publish <name>`.
@@ -208,7 +209,7 @@ The schema version is tracked with `PRAGMA user_version` (v2). An in-place migra
 | POST | `/api/playlists/:id/publish` | — | `{job_id}` |
 | GET | `/api/jobs/:job_id` | — | `{status, progress, total, skipped}` |
 
-Errors use the shape `{error, code}`, with status 400 (invalid input), 401 (failed auth), 404 (not found), 409 (publish already running) or 422 (channel not ready).
+Errors use the shape `{error, code}`, with status 400 (invalid input), 401 (failed auth), 404 (not found), 409 (publish already running or published posts could not be deleted) or 422 (channel not ready).
 
 ## 10. Architecture
 
@@ -247,6 +248,7 @@ Errors use the shape `{error, code}`, with status 400 (invalid input), 401 (fail
 | `copyMessage` fails | Falls back to `sendAudio(file_id)` |
 | Both fail | Skips the track, sets `missing = 1` and reports it in the summary |
 | Delete fails during publish | Stops before posting, retains undeleted message tracking, and explains how to retry |
+| Delete playlist cleanup fails | Keeps the playlist and tracking, returns 409, and explains how to retry |
 | Publish already running | 409 response, "already publishing" |
 | Bad or expired `initData` | 401 response, the Mini App shows a "reopen from bot" screen |
 | Crash during a scan or publish | Scan resumes from `scan_cursor`; abandoned jobs become interrupted. Returned message IDs are cleaned up by the next publish. Unacknowledged sends may require manual cleanup. |

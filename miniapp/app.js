@@ -389,7 +389,7 @@ function renderEditor() {
           <section id="progress" tabindex="-1" aria-live="polite" aria-label="Publish status"></section>
         </div>
         <details class="settings" ${settingsOpen ? "open" : ""}><summary>Playlist settings</summary><form id="rename-form"><label>Name<input id="rename" value="${esc(state.name)}" maxlength="100" required data-edit></label><button id="save-name" class="outline" data-edit>Save name</button></form>
-          <button id="delete" class="danger" data-edit>Delete playlist</button><section id="delete-confirm" hidden><p>Delete this playlist? This can’t be undone. Published posts must be cleared first.</p><button id="confirm-delete" class="danger" data-edit>Confirm deletion</button><button id="cancel-delete" class="secondary">Cancel</button></section>
+          <button id="delete" class="danger" data-edit>Delete playlist</button><p class="muted">Deleting also removes its published posts from the channel.</p>
         </details>
         <p class="editor-tip">${icon("check")}<span>Your audio stays in the vault. Only the playlist order and track references are saved here.</span></p>
       </aside>
@@ -425,15 +425,7 @@ function renderEditor() {
       },
     );
   };
-  root.querySelector("#delete").onclick = () => {
-    root.querySelector("#delete-confirm").hidden = false;
-    root.querySelector("#confirm-delete").focus();
-  };
-  root.querySelector("#cancel-delete").onclick = () => {
-    root.querySelector("#delete-confirm").hidden = true;
-    root.querySelector("#delete").focus();
-  };
-  root.querySelector("#confirm-delete").onclick = () =>
+  root.querySelector("#delete").onclick = () =>
     mutate(
       state,
       () => api(`/playlists/${state.id}`, { method: "DELETE" }),

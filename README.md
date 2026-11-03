@@ -107,7 +107,7 @@ Telegram 429 responses are always honored via `retry_after`, so these delays are
 - Telegram delivery and SQLite commits cannot be atomic. After an ambiguous send failure, inspect the channel and remove any extra post manually before retrying. Publishing replaces posts in batches; it is not an atomic channel swap.
 - Each track keeps its own vault channel. Changing the vault changes the search index shown in the app; existing playlists keep their source references. The vault cannot be a publish target.
 - Edits are blocked during publishing, and simultaneous publishes sharing a channel are rejected to preserve ordering.
-- Publishing an empty playlist clears its tracked posts. Do this before deleting a playlist that was previously published. Failed or interrupted jobs stay visible when you reopen the editor, and a new publish clears partial output first.
+- Deleting a playlist first deletes its tracked posts from the channels where they were posted, then removes it. If cleanup fails, the playlist stays with tracking retained so you can retry. Publishing an empty playlist also clears its tracked posts. Failed or interrupted jobs stay visible when you reopen the editor, and a new publish clears partial output first.
 
 ### Upgrading from v1
 

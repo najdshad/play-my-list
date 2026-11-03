@@ -115,10 +115,10 @@ class Publisher:
                 except Exception as exc:
                     # Never forget messages Telegram did not confirm deleting.
                     raise RuntimeError(
-                        f"Could not clear previous posts in channel {chat_id}. "
+                        f"Could not delete earlier posts in channel {chat_id}. "
                         "Telegram normally allows deletion only within 48 hours. "
                         "Check Delete Messages permission; if the posts are too old, "
-                        "delete them manually in Telegram, then publish again. "
+                        "delete them manually in Telegram, then try again. "
                         "Their tracking has been retained."
                     ) from exc
                 self.db.execute(
@@ -126,6 +126,21 @@ class Publisher:
                     % ",".join("?" for _ in batch),
                     tuple(r["id"] for r in batch),
                 )
+
+    async def clear_playlist(self, playlist_id: int) -> None:
+        old = self.db.fetchall(
+            "SELECT * FROM published_messages WHERE playlist_id=? ORDER BY id",
+            (playlist_id,),
+        )
+        if not old:
+            return
+        if playlist_id in self.running:
+            raise RuntimeError("This playlist is already publishing.")
+        self.running.add(playlist_id)
+        try:
+            await self._clear(old)
+        finally:
+            self.running.discard(playlist_id)
 
     async def _send(self, chat_id: int, track: Any) -> Any:
         if track["vault_chat_id"] is not None:

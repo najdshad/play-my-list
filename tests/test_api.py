@@ -1,6 +1,8 @@
 import asyncio
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import DeleteMessages
 from aiohttp.test_utils import TestClient, TestServer
 
 from bot.api.server import API
@@ -105,7 +107,6 @@ async def test_playlist_workflow(client, auth, tracks, db, bot):
         detail["latest_job"]["id"] == publish["job_id"]
         and detail["published_count"] == 3
     )
-    await json_request(client, auth, "DELETE", f"/api/playlists/{pid}", expected=409)
     for tid in tracks:
         await json_request(client, auth, "DELETE", f"/api/playlists/{pid}/tracks/{tid}")
     await json_request(
@@ -115,6 +116,38 @@ async def test_playlist_workflow(client, auth, tracks, db, bot):
     await json_request(client, auth, "DELETE", f"/api/playlists/{pid}")
     await json_request(client, auth, "GET", f"/api/playlists/{pid}", expected=404)
     assert not db.fetchall("SELECT * FROM published_messages")
+
+
+async def test_delete_playlist_removes_its_published_posts(
+    client, auth, playlist, db, bot
+):
+    await json_request(
+        client, auth, "POST", f"/api/playlists/{playlist}/publish", expected=202
+    )
+    await asyncio.gather(*client.publisher.tasks.values())
+    await json_request(client, auth, "DELETE", f"/api/playlists/{playlist}")
+    await json_request(client, auth, "GET", f"/api/playlists/{playlist}", expected=404)
+    bot.delete_messages.assert_awaited_once_with(-1001, [100, 101, 102])
+    assert not db.fetchall("SELECT * FROM published_messages")
+
+
+async def test_delete_playlist_keeps_tracking_when_posts_cannot_be_deleted(
+    client, auth, playlist, db, bot
+):
+    await json_request(
+        client, auth, "POST", f"/api/playlists/{playlist}/publish", expected=202
+    )
+    await asyncio.gather(*client.publisher.tasks.values())
+    bot.delete_messages.side_effect = TelegramBadRequest(
+        method=DeleteMessages(chat_id=-1001, message_ids=[100, 101, 102]),
+        message="message can't be deleted",
+    )
+    payload = await json_request(
+        client, auth, "DELETE", f"/api/playlists/{playlist}", expected=409
+    )
+    assert payload["code"] == "published_messages_remain"
+    await json_request(client, auth, "GET", f"/api/playlists/{playlist}")
+    assert len(db.fetchall("SELECT * FROM published_messages")) == 3
 
 
 @pytest.mark.parametrize(

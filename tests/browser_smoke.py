@@ -329,7 +329,6 @@ def main():
     assert server_state()["messages"] == {}
     open_settings()
     click("#delete")
-    click("#confirm-delete")
     wait("document.body.innerText.includes('No playlists yet')")
     print("PASS rename, remove tracks, clear posts and delete playlist", flush=True)
 

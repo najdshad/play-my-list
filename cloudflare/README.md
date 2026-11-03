@@ -81,7 +81,7 @@ Open your bot in Telegram, send `/start`, and tap **Open playlists**. The button
 5. Reorder and publish. Check that the destination contains the tracks in the selected order.
 6. Reopen the editor while publishing to check progress recovery.
 7. Reorder and publish again to check cleanup and replacement.
-8. Remove all tracks and publish the empty playlist to clear its tracked posts; then delete it.
+8. Delete the playlist; its tracked posts are removed from the channel first.
 
 Publishing preflight failures now appear in the job progress, because channel permissions are checked by the durable job before any deletion. No request needs to stay open while tracks are published.
 
