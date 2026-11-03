@@ -3,6 +3,17 @@ const [action, address] = process.argv.slice(2);
 const token = process.env.BOT_TOKEN;
 if (!token) throw new Error("Set BOT_TOKEN in .dev.vars first.");
 
+const commands = [
+  { command: "start", description: "Open the playlist app" },
+  { command: "setvault", description: "Choose the vault channel" },
+  { command: "scanstatus", description: "Show scan progress" },
+  { command: "rescan", description: "Rescan the vault from the start" },
+  { command: "resumescan", description: "Resume a failed scan" },
+  { command: "newplaylist", description: "Create a playlist by name" },
+  { command: "list", description: "List playlists" },
+  { command: "publish", description: "Publish a playlist by name" },
+];
+
 async function call(method, parameters = {}) {
   let data;
   try {
@@ -61,8 +72,9 @@ try {
       ],
       drop_pending_updates: false,
     });
+    await call("setMyCommands", { commands });
     console.log(
-      "Webhook registered. Stop the Python polling process before testing this bot.",
+      "Webhook registered and command menu updated. Stop the Python polling process before testing this bot.",
     );
   } else if (action !== "status")
     throw new Error("Use setup <https-worker-url> or status.");
