@@ -298,13 +298,28 @@ export class PlaylistApp extends DurableObject {
     );
   }
 
-  startScan(vault, reset = false) {
+  startScan(vault, reset = false, max = 0) {
     if (this.scanBusy())
       throw new AppError("A scan is already running.", 409, "already_running");
     const changed = this.db.setting("vault_chat_id") !== String(vault);
     if (reset || changed) {
+      const indexed = Number(
+        this.db.one(
+          "SELECT MAX(vault_message_id) n FROM tracks WHERE vault_chat_id=?",
+          vault,
+        ).n,
+      );
       this.db.set("scan_cursor", 0);
-      this.db.set("scan_max_id", 0);
+      this.db.set(
+        "scan_max_id",
+        String(
+          Math.max(
+            max,
+            indexed,
+            changed ? 0 : Number(this.db.setting("scan_max_id", "0")),
+          ),
+        ),
+      );
     }
     let resume = null;
     if (!reset && !changed)
@@ -313,7 +328,10 @@ export class PlaylistApp extends DurableObject {
     this.db.set("scan_state", "running");
     this.db.set("scan_error", "");
     this.db.set("scan_resume", "null");
-    this.db.enqueue("scan", resume || { vault, phase: "probe" });
+    this.db.enqueue("scan", resume || {
+      vault,
+      max: Number(this.db.setting("scan_max_id", "0")),
+    });
   }
 
   assertVault(vault) {
@@ -331,8 +349,11 @@ export class PlaylistApp extends DurableObject {
     if (membership?.chat?.type === "channel")
       this.db.channel(membership.chat, membership.new_chat_member);
     const post = update.channel_post || update.edited_channel_post;
-    if (post && String(post.chat.id) === this.db.setting("vault_chat_id"))
+    if (post && String(post.chat.id) === this.db.setting("vault_chat_id")) {
       this.db.index(post);
+      if (post.message_id > Number(this.db.setting("scan_max_id", "0")))
+        this.db.set("scan_max_id", String(post.message_id));
+    }
     const message = update.message;
     if (
       message?.chat?.type !== "private" ||
@@ -354,7 +375,9 @@ export class PlaylistApp extends DurableObject {
         }
         case "/setvault":
           this.db.set("pending_vault", "1");
-          this.notify("Forward any message from the vault channel to me.");
+          this.notify(
+            "Forward the newest message from the vault channel to me.",
+          );
           return;
         case "/scanstatus":
           this.notify(
@@ -399,12 +422,15 @@ export class PlaylistApp extends DurableObject {
         const chat = message.forward_origin.chat;
         if (!chat || chat.type !== "channel")
           throw new AppError("That message does not identify a channel.");
+        const max = Number(message.forward_origin.message_id);
+        if (!Number.isInteger(max) || max < 1)
+          throw new AppError("Forward the newest message from the vault.");
         if (this.scanBusy())
           throw new AppError(
             "A scan is already running. Wait for it to finish.",
           );
         this.assertVault(chat.id);
-        this.db.enqueue("select_vault", { vault: chat.id, phase: "chat" });
+        this.db.enqueue("select_vault", { vault: chat.id, phase: "chat", max });
       }
     } catch (error) {
       this.notify(
@@ -776,18 +802,14 @@ export class PlaylistApp extends DurableObject {
       chat_id: payload.vault,
       user_id: Number(this.env.BOT_TOKEN.split(":")[0]),
     });
-    if (
-      rights.status !== "administrator" ||
-      !rights.can_post_messages ||
-      !rights.can_delete_messages
-    )
+    if (rights.status !== "administrator")
       throw new AppError(
-        "Give the bot Post Messages and Delete Messages permissions in the vault.",
+        "Make the bot an administrator of the vault. It only needs to read and forward messages; no Post or Delete permissions are required.",
       );
     this.db.atomic(() => {
       this.db.channel({ id: payload.vault, title: payload.title }, rights);
       this.db.exec("DELETE FROM tasks WHERE id=?", task.id);
-      this.startScan(payload.vault, true);
+      this.startScan(payload.vault, true, Number(payload.max));
       this.db.set("pending_vault", "0");
       this.notify("Vault saved; scan started. Use /scanstatus for progress.");
     });
@@ -798,35 +820,6 @@ export class PlaylistApp extends DurableObject {
     const delay = Number(this.env.SCAN_DELAY_SECONDS ?? 1) * 1000;
     const next = (changes, wait = 0) =>
       this.db.updateTask(task, { ...payload, ...changes }, wait);
-    if (payload.phase === "probe") {
-      const probe = await this.call(
-        task,
-        "sendMessage",
-        { chat_id: payload.vault, text: "Scanning…" },
-        true,
-      );
-      this.db.atomic(() => {
-        this.db.set("scan_max_id", probe.message_id - 1);
-        next({
-          phase: "delete_probe",
-          max: probe.message_id - 1,
-          probe: probe.message_id,
-        });
-      });
-      return;
-    }
-    if (payload.phase === "delete_probe") {
-      try {
-        await this.call(task, "deleteMessage", {
-          chat_id: payload.vault,
-          message_id: payload.probe,
-        });
-      } catch (error) {
-        if (!matches(error, "message to delete not found")) throw error;
-      }
-      next({ phase: "forward" });
-      return;
-    }
     if (payload.phase === "delete_forward") {
       try {
         await this.call(task, "deleteMessage", {
@@ -844,7 +837,7 @@ export class PlaylistApp extends DurableObject {
       return;
     }
     const message = Number(this.db.setting("scan_cursor", "0")) + 1;
-    if (message > payload.max) {
+    if (message > Number(payload.max ?? this.db.setting("scan_max_id", "0"))) {
       this.db.atomic(() => {
         this.db.exec("DELETE FROM tasks WHERE id=?", task.id);
         this.db.set("scan_state", "done");

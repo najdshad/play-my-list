@@ -26,7 +26,7 @@ These credentials are for deployment only. `BOT_TOKEN` and `WEBHOOK_SECRET` rema
 - Node.js 22+ and npm.
 - A Cloudflare account with Workers and SQLite-backed Durable Objects enabled. Check your account's current limits and billing before deploying.
 - A Telegram bot token and your numeric Telegram user ID.
-- A vault channel and at least one separate publish channel. Give the bot Post Messages and Delete Messages permissions in both. Disable Restrict Saving Content in the vault.
+- A vault channel and at least one separate publish channel. Make the bot an administrator of the vault (read and forward only; no Post or Delete permissions are needed) and give it Post Messages and Delete Messages in publish channels. Disable Restrict Saving Content in the vault.
 
 ## First deployment
 
@@ -74,7 +74,7 @@ Open your bot in Telegram, send `/start`, and tap **Open playlists**. The button
 
 ## Functional test
 
-1. Send `/setvault` and forward a message from the vault to the bot.
+1. Send `/setvault` and forward the newest message from the vault to the bot. The forward sets the scan's upper bound, so it must be the latest upload.
 2. Check `/scanstatus` until the scan is done. Temporary forwards appear in your DM and are deleted as scanning advances.
 3. Add the bot to the destination channel, or toggle its administrator permissions so Telegram sends a membership update if it was already an administrator before deployment.
 4. Send `/start`, open the Mini App, create a playlist, select the destination, search, and add two or three tracks.

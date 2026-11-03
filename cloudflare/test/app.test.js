@@ -148,11 +148,14 @@ beforeEach(async () => {
     if (failure) return Response.json({ ok: false, ...failure });
     let result = true;
     if (method === "getChatMember")
-      result = {
-        status: "administrator",
-        can_post_messages: true,
-        can_delete_messages: true,
-      };
+      result =
+        input.chat_id < -9000
+          ? { status: "administrator" }
+          : {
+              status: "administrator",
+              can_post_messages: true,
+              can_delete_messages: true,
+            };
     if (method === "getChat")
       result = { id: input.chat_id, type: "channel", title: "Vault" };
     if (["sendAudio", "copyMessage", "sendMessage"].includes(method))
@@ -605,8 +608,8 @@ describe("durable vault scanning", () => {
       method === "forwardMessage" && input.message_id === 2
         ? { error_code: 400, description: "message to forward not found" }
         : null;
-    // Start directly so the scan probe has a predictable maximum message ID.
-    await inside((app) => app.startScan(-9001, true));
+    // Start directly so the scan maximum is deterministic.
+    await inside((app) => app.startScan(-9001, true, 3));
     await drain();
     expect((await api("GET", "/tracks")).map((t) => t.title)).toEqual([
       "Scanned",
@@ -623,7 +626,7 @@ describe("durable vault scanning", () => {
     ).toHaveLength(2);
     await command("/setvault", 1);
     await command("", 2, {
-      forward_origin: { chat: { id: -9002, type: "channel" } },
+      forward_origin: { chat: { id: -9002, type: "channel" }, message_id: 4 },
     });
     // Process just the selection checks; the scan is exercised above.
     for (let i = 0; i < 5; i++) {
@@ -636,11 +639,28 @@ describe("durable vault scanning", () => {
     );
   });
 
+  it("accepts a read-only vault and never writes to it", async () => {
+    await command("/setvault");
+    await command("", 2, {
+      forward_origin: { chat: { id: -9002, type: "channel" }, message_id: 2 },
+    });
+    await drain();
+    expect(await inside((app) => app.db.setting("vault_chat_id"))).toBe("-9002");
+    expect(await inside((app) => app.db.setting("scan_state"))).toBe("done");
+    expect(
+      calls.filter(
+        (c) =>
+          ["sendMessage", "deleteMessage"].includes(c.method) &&
+          c.chat_id === -9002,
+      ),
+    ).toEqual([]);
+  });
+
   it("does not advance the cursor on a network failure and resumes", async () => {
     nextMessage = 2;
     fail = (method) =>
       method === "forwardMessage" ? new Error("offline") : null;
-    await inside((app) => app.startScan(-9001, true));
+    await inside((app) => app.startScan(-9001, true, 2));
     await drain();
     expect(await inside((app) => app.db.setting("scan_cursor"))).toBe("0");
     expect(await inside((app) => app.db.setting("scan_state"))).toBe("error");
@@ -670,7 +690,7 @@ describe("durable vault scanning", () => {
       method === "deleteMessage" && input.chat_id === 7
         ? new Error("offline")
         : null;
-    await inside((app) => app.startScan(-9001, true));
+    await inside((app) => app.startScan(-9001, true, 1));
     await drain();
     expect(await inside((app) => app.db.setting("scan_cursor"))).toBe("0");
     expect(
@@ -701,7 +721,7 @@ describe("durable vault scanning", () => {
     );
     await command("/setvault");
     await command("", 2, {
-      forward_origin: { chat: { id: -9002, type: "channel" } },
+      forward_origin: { chat: { id: -9002, type: "channel" }, message_id: 4 },
     });
     await drain();
     expect(await inside((app) => app.db.setting("vault_chat_id"))).toBe(
