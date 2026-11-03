@@ -458,13 +458,16 @@ export class PlaylistApp extends DurableObject {
       switch (command.split("@")[0]) {
         case "/start": {
           const url = this.env.WEB_APP_URL || this.db.setting("web_app_url");
-          this.notify("Build and publish your playlists.", {
+          this.notify("Welcome to Play My List! Turn tracks from your Telegram vault into playlists and publish them to your channels.\n\nStart with /setvault, then open the app to build your first playlist. Send /help for all commands.", {
             reply_markup: {
               inline_keyboard: [[{ text: "Open playlists", web_app: { url } }]],
             },
           });
           return;
         }
+        case "/help":
+          this.notify("Play My List helps you organize tracks from a Telegram vault and publish playlists to your channels.\n\nGetting started: add the bot as an admin to your vault and playlist channels, send /setvault and forward the newest vault message, then open the app with /start. Choose a destination and add tracks before publishing.\n\n/start — Open the playlist app\n/help — Show this guide\n/setvault — Choose a vault and scan it\n/scanstatus — Show scan progress\n/syncvault — Check the vault for new tracks\n/rescan — Scan the whole vault again\n/resumescan — Resume a failed scan\n/newplaylist <name> — Create a playlist\n/list — List playlists\n/publish <name> — Publish a playlist\n/cancel — Cancel scans and publishing");
+          return;
         case "/setvault":
           this.db.set("pending_sync", "0");
           this.db.set("pending_vault", "1");

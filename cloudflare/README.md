@@ -66,7 +66,7 @@ npm run telegram:setup -- https://play-my-list.YOUR-SUBDOMAIN.workers.dev
 npm run telegram:status
 ```
 
-The setup script checks `/health`, registers `/telegram/webhook` with Telegram using the webhook secret, preserves pending updates, enables the update types the app needs, and updates the bot's command menu. It reads the same `.dev.vars` credentials you uploaded. It does not print your bot token or webhook secret.
+The setup script checks `/health`, registers `/telegram/webhook` with Telegram using the webhook secret, preserves pending updates, enables the update types the app needs, and updates the bot's command menu and profile descriptions. Run it again after updating these settings. It reads the same `.dev.vars` credentials you uploaded. It does not print your bot token or webhook secret.
 
 If your network requires an HTTP proxy, use a current Node.js 22 release and enable proxy support when running the helper, for example `NODE_OPTIONS=--use-env-proxy npm run telegram:status`. Node reads `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` with that flag. Wrangler already detects proxy environment variables.
 

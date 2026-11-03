@@ -5,6 +5,7 @@ if (!token) throw new Error("Set BOT_TOKEN in .dev.vars first.");
 
 const commands = [
   { command: "start", description: "Open the playlist app" },
+  { command: "help", description: "Show setup and command help" },
   { command: "setvault", description: "Choose the vault channel" },
   { command: "scanstatus", description: "Show scan progress" },
   { command: "syncvault", description: "Check the vault for new tracks" },
@@ -75,8 +76,14 @@ try {
       drop_pending_updates: false,
     });
     await call("setMyCommands", { commands });
+    await call("setMyDescription", {
+      description: "Turn your Telegram music channel into playlists. Index tracks from your vault, organize them in the Mini App, and publish playlists to your channels. Send /start to get started or /help for commands.",
+    });
+    await call("setMyShortDescription", {
+      short_description: "Organize music from your Telegram vault and publish playlists to your channels.",
+    });
     console.log(
-      "Webhook registered and command menu updated. Stop the Python polling process before testing this bot.",
+      "Webhook registered; command menu and bot descriptions updated. Stop the Python polling process before testing this bot.",
     );
   } else if (action !== "status")
     throw new Error("Use setup <https-worker-url> or status.");

@@ -73,13 +73,16 @@ Telegram normally allows bots to delete only messages posted within the last 48 
 | Command | Action |
 |---|---|
 | `/start` | Welcome message and a button that opens the Mini App |
+| `/help` | Getting started guide and available commands |
 | `/setvault` | Choose the vault channel and start the first scan |
 | `/scanstatus` | Scan progress and indexed track count |
+| `/syncvault` | Check the vault for new tracks (Cloudflare only) |
 | `/rescan` | Scan the whole vault again (updates in place, no duplicates) |
 | `/resumescan` | Retry a failed scan without resetting its cursor |
 | `/newplaylist <name>` | Create an empty playlist |
-| `/list` | Playlists with track counts and channels |
+| `/list` | Playlists with track counts |
 | `/publish <name>` | Publish a playlist |
+| `/cancel` | Cancel running scans and publishing (Cloudflare only) |
 
 ## Configuration
 

@@ -44,7 +44,34 @@ def build_router(db: Any, config: Any, scanner: Any, publisher: Any):
                     ]
                 ]
             )
-        await message.answer("Build and publish your playlists.", reply_markup=markup)
+        await message.answer(
+            "Welcome to Play My List! Turn tracks from your Telegram vault into "
+            "playlists and publish them to your channels.\n\n"
+            "Start with /setvault, then open the app to build your first playlist. "
+            "Send /help for all commands.",
+            reply_markup=markup,
+        )
+
+    @router.message(Command("help"))
+    async def help_command(message: Message):
+        if not owner(message):
+            return
+        await message.answer(
+            "Play My List helps you organize tracks from a Telegram vault and "
+            "publish playlists to your channels.\n\n"
+            "Getting started: add the bot as an admin to your vault and playlist "
+            "channels, send /setvault and forward a vault message, then open the "
+            "app with /start. Choose a destination and add tracks before publishing.\n\n"
+            "/start — Open the playlist app\n"
+            "/help — Show this guide\n"
+            "/setvault — Choose a vault and scan it\n"
+            "/scanstatus — Show scan progress\n"
+            "/rescan — Scan the whole vault again\n"
+            "/resumescan — Resume a failed scan\n"
+            "/newplaylist <name> — Create a playlist\n"
+            "/list — List playlists\n"
+            "/publish <name> — Publish a playlist"
+        )
 
     @router.message(Command("setvault"))
     async def setvault(message: Message):
