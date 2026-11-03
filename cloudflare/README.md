@@ -10,7 +10,16 @@ The Worker serves the existing `miniapp/` assets and authenticates API requests 
 https://play-my-list.alirezanajdshad28.workers.dev
 ```
 
-This repository's Worker and Telegram webhook are deployed at that address. Open the app through **Open playlists** after sending `/start` to the bot. For future updates, run `npm run deploy`; existing Worker secrets and Durable Object data are retained.
+This repository's Worker and Telegram webhook are deployed at that address. Open the app through **Open playlists** after sending `/start` to the bot. Updates can be deployed automatically through GitHub Actions or manually with `npm run deploy`; existing Worker secrets and Durable Object data are retained.
+
+## Automatic deployment from GitHub
+
+The GitHub Actions workflow tests and deploys the Worker on pushes to `main`. It can also be started manually from the Actions tab. To enable it, add these repository secrets under **Settings → Secrets and variables → Actions**:
+
+- `CLOUDFLARE_API_TOKEN`: a Cloudflare API token with permission to edit Workers in the account containing this Worker (the **Edit Cloudflare Workers** token template can be used).
+- `CLOUDFLARE_ACCOUNT_ID`: the ID of that Cloudflare account, available in the Cloudflare dashboard.
+
+These credentials are for deployment only. `BOT_TOKEN` and `WEBHOOK_SECRET` remain Worker secrets and do not need to be added to GitHub Actions. A failed test prevents deployment.
 
 ## Requirements
 
