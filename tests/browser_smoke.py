@@ -60,6 +60,20 @@ def ready():
     )
 
 
+def open_settings():
+    if not evaluate("document.querySelector('.settings').open"):
+        click(".settings summary")
+
+
+def check_responsive():
+    for width in (320, 390, 768, 1280):
+        run("set", "viewport", width, 844)
+        assert evaluate(
+            "document.documentElement.scrollWidth <= window.innerWidth"
+        ), f"Horizontal overflow at {width}px"
+    run("set", "viewport", 390, 844)
+
+
 def server_state():
     return evaluate("fetch('/__test/state').then(r=>r.json())")
 
@@ -143,10 +157,45 @@ def main():
     run("open", URL)
     run("set", "viewport", 390, 844)
     wait("document.body.innerText.includes('No playlists yet')")
+    assert evaluate("document.documentElement.dataset.theme === 'light'")
+    run("select", "#theme", "dark")
+    assert evaluate("document.documentElement.dataset.theme === 'dark'")
+    assert evaluate(
+        "getComputedStyle(document.documentElement).backgroundColor === 'rgb(16, 30, 42)'"
+    )
+    check_responsive()
+    run("reload")
+    wait("document.body.innerText.includes('No playlists yet')")
+    assert evaluate("document.querySelector('#theme').value === 'dark'")
+    assert evaluate("document.documentElement.dataset.theme === 'dark'")
+    evaluate("window.Telegram.WebApp.colorScheme='dark';true")
+    run("select", "#theme", "auto")
+    assert evaluate("document.documentElement.dataset.theme === 'dark'")
+    evaluate("window.Telegram.WebApp.colorScheme='light';window.Telegram.WebApp._events.themeChanged();true")
+    assert evaluate("document.documentElement.dataset.theme === 'light'")
+    print("PASS theme selection, persistence and Telegram theme changes", flush=True)
     click("#new")
+    run("fill", "#playlist-name", "   ")
+    click("#create-form button[type=submit]")
+    assert not evaluate("document.querySelector('#playlist-name').checkValidity()")
     run("fill", "#playlist-name", "Browser trip")
     click("#create-form button[type=submit]")
     run("wait", "#search")
+    click("#back")
+    run("wait", "[data-playlist]")
+    check_responsive()
+    click('[data-filter="published"]')
+    assert evaluate("document.querySelector('[data-playlist]') === null")
+    click("#reset-filters")
+    run("fill", "#library-search", "no such playlist")
+    assert evaluate("document.querySelector('[data-playlist]') === null")
+    run("fill", "#library-search", "BROWSER")
+    run("wait", "[data-playlist]")
+    click("[data-playlist]")
+    ready()
+    click("#browse")
+    run("wait", ".result")
+    print("PASS name validation, library filters, playlist search and vault browsing", flush=True)
     run("select", "#channel", "-1001")
     ready()
     run("fill", "#search", "Band")
@@ -158,6 +207,7 @@ def main():
         )
         assert evaluate(f"document.querySelector('[data-add=\"{tid}\"]').disabled")
     assert ids() == [1, 2, 3]
+    check_responsive()
     print("PASS create, choose channel, search and add tracks", flush=True)
 
     click('[data-down="0"]')
@@ -256,11 +306,12 @@ def main():
         flush=True,
     )
 
-    click("summary")
+    open_settings()
     run("fill", "#rename", "Renamed trip")
     click("#rename-form button")
     wait("document.querySelector('h2').textContent === 'Renamed trip'")
     ready()
+    assert evaluate("document.querySelector('.settings').open")
     run("screenshot", "/tmp/play-my-list-browser.png")
     for tid in (1, 3, 2):
         click(f'[data-remove="{tid}"]')
@@ -276,7 +327,7 @@ def main():
         "document.querySelector('#progress').textContent.includes('Finished') && document.querySelector('#publish').disabled && !document.querySelector('#channel').disabled"
     )
     assert server_state()["messages"] == {}
-    click("summary")
+    open_settings()
     click("#delete")
     click("#confirm-delete")
     wait("document.body.innerText.includes('No playlists yet')")

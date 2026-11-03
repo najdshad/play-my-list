@@ -111,7 +111,7 @@ async def main():
 
         async def telegram(request):
             noop = "function(){}"
-            bridge = {"initData": signed_init_data()}
+            bridge = {"initData": signed_init_data(), "colorScheme": "light"}
             text = (
                 "window.Telegram={WebApp:"
                 + json.dumps(bridge)
@@ -120,6 +120,7 @@ async def main():
             text += f"t.ready=t.expand={noop};t.BackButton={{show:{noop},hide:{noop},onClick:{noop}}};"
             text += f"t.MainButton={{show:{noop},hide:{noop},enable:{noop},disable:{noop},setText:{noop},onClick:{noop}}};"
             text += f"t.HapticFeedback={{selectionChanged:{noop}}};"
+            text += "t.onEvent=(name,callback)=>{(t._events??={})[name]=callback};"
             return web.Response(text=text, content_type="application/javascript")
 
         async def failure(request):
