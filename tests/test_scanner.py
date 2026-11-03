@@ -41,6 +41,23 @@ async def test_scan_gaps_and_live_upsert(db, bot):
     bot.delete_message.assert_awaited_once()  # probe only
 
 
+async def test_scan_only_prunes_confirmed_deleted_sources(db, bot, tracks):
+    async def forward(owner, vault, mid):
+        if mid < 3:
+            raise TelegramBadRequest(
+                method=ForwardMessage(chat_id=owner, from_chat_id=vault, message_id=mid),
+                message="message can't be forwarded" if mid == 1 else "message to forward not found",
+            )
+        return SimpleNamespace(message_id=103, audio=None)
+
+    bot.forward_message.side_effect = forward
+    scanner = Scanner(bot, db, 7, 0)
+    scanner.start(-9001, rescan=True)
+    await scanner.task
+    assert [row["id"] for row in db.fetchall("SELECT id FROM tracks")] == [tracks[0]]
+    assert scanner.status()["state"] == "done"
+
+
 async def test_temporary_failure_retries_same_id(db, bot, no_retry_wait):
     bot.send_message.return_value.message_id = 2
     bot.forward_message.side_effect = [ConnectionError("offline"), forwarded()]
@@ -128,7 +145,7 @@ async def test_vault_validation_does_not_replace_existing_setting(db, bot):
     assert db.setting("vault_chat_id") == "-9001"
 
 
-async def test_vault_switch_resets_cursor_and_preserves_old_sources(db, bot, tracks):
+async def test_vault_switch_resets_cursor_and_preserves_old_sources(db, bot, playlist):
     db.set_setting("scan_cursor", 500)
     scanner = Scanner(bot, db, 7, 0)
     await scanner.select_vault(-9002)

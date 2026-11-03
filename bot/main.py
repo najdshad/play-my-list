@@ -48,6 +48,13 @@ async def run() -> None:
         publisher,
     )
     runner = web.AppRunner(api.app())
+
+    async def maintain_database() -> None:
+        while True:
+            await asyncio.sleep(24 * 60 * 60)
+            db.maintain()
+
+    maintenance = asyncio.create_task(maintain_database())
     try:
         publisher.recover()
         await runner.setup()
@@ -56,6 +63,8 @@ async def run() -> None:
         scanner.resume()
         await dp.start_polling(bot, close_bot_session=False)
     finally:
+        maintenance.cancel()
+        await asyncio.gather(maintenance, return_exceptions=True)
         await runner.cleanup()
         await scanner.close()
         await publisher.close()

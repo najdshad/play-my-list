@@ -36,6 +36,7 @@ class Publisher:
             updated_at=? WHERE status='running'""",
             (now_iso(),),
         )
+        self.db.maintain()
 
     async def close(self) -> None:
         self.closing = True
@@ -274,3 +275,4 @@ class Publisher:
             self.running.discard(pid)
             self.busy_channels.difference_update(channels)
             self.tasks.pop(pid, None)
+            self.db.maintain()

@@ -46,6 +46,8 @@ export const scanGap = (error) =>
     "message_id_invalid",
     "message can't be forwarded",
   );
+export const scanSourceMissing = (error) =>
+  matches(error, "message to forward not found", "message_id_invalid");
 export const sourceUnavailable = (error) =>
   matches(
     error,

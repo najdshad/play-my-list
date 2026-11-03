@@ -111,6 +111,8 @@ Telegram 429 responses are always honored via `retry_after`, so these delays are
 - Each track keeps its own vault channel. Changing the vault changes the search index shown in the app; existing playlists keep their source references. The vault cannot be a publish target.
 - Edits are blocked during publishing, and simultaneous publishes sharing a channel are rejected to preserve ordering.
 - Deleting a playlist first deletes its tracked posts from the channels where they were posted, then removes it. If cleanup fails, the playlist stays with tracking retained so you can retry. Publishing an empty playlist also clears its tracked posts. Failed or interrupted jobs stay visible when you reopen the editor, and a new publish clears partial output first.
+- Database cleanup keeps the latest finished publish result per playlist and all running jobs. Unused tracks from previous vaults and confirmed-unavailable audio are removed; the current vault library, playlist tracks, and published-message references are retained. A scan removes unused metadata for source messages it confirms are gone. Cleanup runs after relevant changes, at startup, and daily.
+- The Python SQLite database enables secure deletion and incremental page reclamation, including a one-time rebuild of older databases. Maintenance returns freed pages and truncates the WAL so deleted data does not leave the local database at its previous peak size. Cloudflare storage behavior is described in its [operations guide](cloudflare/README.md#operations-and-recovery).
 
 ### Upgrading from v1
 

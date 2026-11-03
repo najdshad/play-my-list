@@ -65,6 +65,10 @@ def scan_gap(exc: Exception) -> bool:
     )
 
 
+def scan_source_missing(exc: Exception) -> bool:
+    return bad_request_matches(exc, "message to forward not found", "message_id_invalid")
+
+
 def copy_source_unavailable(exc: Exception) -> bool:
     return bad_request_matches(
         exc,

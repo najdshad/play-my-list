@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS published_messages (
   track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
   published_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track ON playlist_tracks(track_id);
+CREATE INDEX IF NOT EXISTS idx_published_messages_track ON published_messages(track_id);
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
@@ -63,3 +65,4 @@ CREATE TABLE IF NOT EXISTS jobs (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_jobs_playlist ON jobs(playlist_id, id);

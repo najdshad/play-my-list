@@ -180,6 +180,7 @@ class API:
         except RuntimeError as exc:
             raise APIError(str(exc), "published_messages_remain", 409) from exc
         self.db.execute("DELETE FROM playlists WHERE id=?", (row["id"],))
+        self.db.maintain()
         return web.json_response({"ok": True})
 
     async def tracks(self, request):
@@ -211,6 +212,7 @@ class API:
             "DELETE FROM playlist_tracks WHERE playlist_id=? AND track_id=?",
             (row["id"], track_id),
         )
+        self.db.maintain()
         return web.json_response({"ok": True})
 
     async def order(self, request):

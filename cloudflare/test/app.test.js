@@ -8,6 +8,7 @@ import {
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index.js";
 import { hmac } from "../src/auth.js";
+import { TelegramError } from "../src/telegram.js";
 
 let calls, fail, nextMessage, vaultMarker, authorization, stub;
 
@@ -1168,5 +1169,95 @@ describe("owner task fairness", () => {
     });
     expect(calls.map((c) => c.method)).toEqual(["forwardMessage", "sendMessage"]);
     expect(calls.at(-1).text).toBe("Scan status");
+  });
+});
+
+describe("database maintenance", () => {
+  it("only prunes source metadata when a scan confirms it is gone", async () => {
+    await seed();
+    await inside(async (app) => {
+      app.db.exec("DELETE FROM playlist_tracks");
+      app.startScan(-9001, true, 3);
+      const original = app.call;
+      app.call = async (task, method, input) => {
+        if (method !== "forwardMessage") return true;
+        if (input.message_id === 1)
+          throw new TelegramError("message can't be forwarded", 400);
+        if (input.message_id === 2)
+          throw new TelegramError("message to forward not found", 400);
+        return { message_id: 103, text: "No audio" };
+      };
+      try {
+        for (let i = 0; i < 10; i++) {
+          const task = app.db.one("SELECT * FROM tasks WHERE kind='scan'");
+          if (!task) break;
+          await app.scanStep(task, JSON.parse(task.payload));
+        }
+      } finally {
+        app.call = original;
+      }
+      expect(app.db.all("SELECT id FROM tracks")).toEqual([{ id: 1 }]);
+      expect(app.db.setting("scan_state")).toBe("done");
+    });
+  });
+
+  it("keeps the latest publish result and active snapshots while pruning unused tracks", async () => {
+    const pid = await seed();
+    await inside((app) => {
+      const db = app.db;
+      for (const [unique, source, missing] of [["old", -9002, 0], ["missing", -9001, 1], ["snapshot", -9002, 0]]) {
+        db.index({ chat: { id: source }, message_id: 50, audio: { file_unique_id: unique, file_id: unique } });
+        db.exec("UPDATE tracks SET missing=? WHERE file_unique_id=?", missing, unique);
+      }
+      const track = db.one("SELECT id FROM tracks WHERE file_unique_id='snapshot'").id;
+      for (const status of ["done", "error", "running"])
+        db.exec("INSERT INTO jobs(playlist_id,status,current_track,created_at,updated_at,state) VALUES(?,?,?,?,?,?)",
+          pid, status, "Snapshot", "today", "today", JSON.stringify({ tracks: [track] }));
+      db.prune();
+      expect(db.all("SELECT status,state,current_track FROM jobs ORDER BY id")).toEqual([
+        { status: "error", state: "{}", current_track: null },
+        { status: "running", state: JSON.stringify({ tracks: [track] }), current_track: "Snapshot" },
+      ]);
+      expect(db.all("SELECT file_unique_id FROM tracks ORDER BY id").map((r) => r.file_unique_id)).toEqual(["unique-1", "unique-2", "unique-3", "snapshot"]);
+      expect(db.tracks(pid)).toHaveLength(3);
+      db.exec("UPDATE jobs SET status='done' WHERE status='running'");
+      db.prune();
+      expect(db.one("SELECT COUNT(*) n FROM jobs").n).toBe(1);
+      expect(db.one("SELECT 1 FROM tracks WHERE file_unique_id='snapshot'")).toBe(null);
+    });
+  });
+
+  it("prunes confirmed deleted sources while preserving published references and the current library", async () => {
+    const pid = await seed();
+    await inside((app) => {
+      const db = app.db;
+      db.exec("DELETE FROM playlist_tracks WHERE track_id IN (2,3)");
+      db.exec("INSERT INTO published_messages(playlist_id,chat_id,message_id,track_id,published_at) VALUES(?,-1001,100,2,'today')", pid);
+      db.pruneSource(-9001, 1);
+      db.pruneSource(-9001, 2);
+      db.prune();
+      expect(db.one("SELECT COUNT(*) n FROM tracks").n).toBe(3);
+      db.pruneSource(-9001, 3);
+      expect(db.one("SELECT COUNT(*) n FROM tracks").n).toBe(2);
+      expect(db.one("SELECT COUNT(*) n FROM published_messages").n).toBe(1);
+    });
+  });
+
+  it("expires webhook receipts on an idle maintenance alarm and schedules the next cleanup", async () => {
+    await inside(async (app) => {
+      app.db.exec("INSERT INTO updates VALUES(?,?)", 1, Date.now() - 8 * 86400000);
+      app.db.exec("INSERT INTO updates VALUES(?,?)", 2, Date.now());
+      for (const chat of [7, -8000])
+        app.db.set(`chat_pacing:${chat}`, JSON.stringify({ until: 0, interval: 2200 }));
+      app.db.set("maintenance_at", "0");
+      delete app.schedule;
+      await app.alarm();
+      expect(app.db.all("SELECT id FROM updates")).toEqual([{ id: 2 }]);
+      expect(app.db.setting("chat_pacing:-8000")).toBe(null);
+      expect(JSON.parse(app.db.setting("chat_pacing:7")).interval).toBe(2200);
+      const alarm = await app.ctx.storage.getAlarm();
+      expect(alarm).toBeGreaterThan(Date.now());
+      expect(alarm).toBe(app.db.maintenanceDue());
+    });
   });
 });

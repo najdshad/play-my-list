@@ -5,9 +5,15 @@ import logging
 from typing import Any
 
 from bot.db.database import Database, now_iso
-from bot.services.telegram import check_channel_rights, retry_telegram, scan_gap
+from bot.services.telegram import (
+    check_channel_rights,
+    retry_telegram,
+    scan_gap,
+    scan_source_missing,
+)
 
 log = logging.getLogger(__name__)
+_UNFORWARDABLE = object()
 
 
 class Scanner:
@@ -51,6 +57,7 @@ class Scanner:
         if rescan or self.db.setting("vault_chat_id") != str(vault_chat_id):
             self.db.set_setting("scan_cursor", 0)
         self.db.set_setting("vault_chat_id", vault_chat_id)
+        self.db.maintain()
         self.db.set_setting("scan_state", "running")
         self.db.set_setting("scan_error", "")
         self.task = asyncio.create_task(self.run(vault_chat_id))
@@ -84,7 +91,7 @@ class Scanner:
                 if not scan_gap(exc):
                     raise
                 log.debug("Scan gap at %s: %s", message_id, exc)
-                return None
+                return None if scan_source_missing(exc) else _UNFORWARDABLE
 
     async def run(self, vault_chat_id: int) -> None:
         self.db.set_setting("scan_state", "running")
@@ -116,6 +123,10 @@ class Scanner:
                 for message_id, result in zip(batch, results):
                     if isinstance(result, BaseException):
                         error = error or result
+                    elif result is _UNFORWARDABLE:
+                        continue
+                    elif result is None:
+                        self.db.prune_source(vault_chat_id, message_id)
                     elif result is not None:
                         self.index_channel_post(
                             result,
@@ -141,6 +152,7 @@ class Scanner:
                 await asyncio.sleep(self.delay)
             self.db.set_setting("scan_state", "done")
             self.db.set_setting("scan_error", "")
+            self.db.maintain()
         except asyncio.CancelledError:
             self.db.set_setting("scan_state", "paused")
             raise
@@ -180,6 +192,9 @@ class Scanner:
         message_id: int | None = None,
     ) -> int | None:
         audio = getattr(message, "audio", None)
+        source = vault_chat_id if vault_chat_id is not None else message.chat.id
+        mid = message_id if message_id is not None else message.message_id
+        self.db.prune_source(source, mid, audio.file_unique_id if audio else None)
         if not audio:
             return None
         return self.db.upsert_track(

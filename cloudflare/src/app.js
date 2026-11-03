@@ -13,6 +13,7 @@ import {
   TelegramError,
   transient,
   scanGap,
+  scanSourceMissing,
   sourceUnavailable,
   invalidAudio,
 } from "./telegram.js";
@@ -22,12 +23,10 @@ const CLEANUP_BATCH = 10;
 export class PlaylistApp extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
-    this.db = new Store(ctx.storage);
+    this.db = new Store(ctx.storage, env.OWNER_ID);
     ctx.blockConcurrencyWhile(async () => {
-      if (
-        this.db.one("SELECT 1 FROM tasks") &&
-        (await ctx.storage.getAlarm()) === null
-      )
+      this.db.maintain();
+      if ((await ctx.storage.getAlarm()) === null)
         await this.schedule();
     });
   }
@@ -37,6 +36,7 @@ export class PlaylistApp extends DurableObject {
     // There is at most one bounded Telegram request per alarm (12s timeout).
     return this.ctx.blockConcurrencyWhile(async () => {
       try {
+        this.db.maintain();
         const url = new URL(request.url);
         let response;
         if (url.pathname === "/telegram/webhook" && request.method === "POST") {
@@ -51,10 +51,6 @@ export class PlaylistApp extends DurableObject {
               "INSERT INTO updates VALUES(?,?)",
               update.update_id,
               Date.now(),
-            );
-            this.db.exec(
-              "DELETE FROM updates WHERE received_at<?",
-              Date.now() - 7 * 86400000,
             );
             this.db.set("web_app_url", url.origin);
             this.update(update);
@@ -71,14 +67,8 @@ export class PlaylistApp extends DurableObject {
 
   async schedule() {
     const next = this.nextTask();
-    if (!next) {
-      await this.ctx.storage.deleteAlarm();
-      return;
-    }
-    const due = Math.max(
-      next.eligible,
-      Date.now() + 1,
-    );
+    const due = Math.max(Date.now() + 1,
+      Math.min(next?.eligible ?? Infinity, this.db.maintenanceDue()));
     await this.ctx.storage.setAlarm(due);
   }
 
@@ -278,6 +268,7 @@ export class PlaylistApp extends DurableObject {
           );
         }
         this.db.exec("DELETE FROM playlists WHERE id=?", row.id);
+        this.db.prune();
         return json({ ok: true });
       }
     }
@@ -303,6 +294,7 @@ export class PlaylistApp extends DurableObject {
           row.id,
           integer(trackId, "track id", 1),
         );
+        this.db.prune();
         return json({ ok: true });
       }
     }
@@ -364,6 +356,7 @@ export class PlaylistApp extends DurableObject {
       }
       this.db.set("pending_vault", "0");
       this.db.set("pending_sync", "0");
+      this.db.prune();
     });
     const interrupted = tasks.find(
       (task) => task.inflight && task.kind !== "notification",
@@ -424,6 +417,7 @@ export class PlaylistApp extends DurableObject {
       requests: 0,
       cached: 0,
     });
+    if (changed) this.db.prune();
   }
 
   assertVault(vault) {
@@ -679,8 +673,12 @@ export class PlaylistApp extends DurableObject {
 
   async alarm() {
     return this.ctx.blockConcurrencyWhile(async () => {
+      this.db.maintain();
       const task = this.nextTask();
-      if (!task) return;
+      if (!task) {
+        await this.schedule();
+        return;
+      }
       if (
         task.eligible > Date.now()
       ) {
@@ -794,6 +792,7 @@ export class PlaylistApp extends DurableObject {
         ? `Published ${state.name}: ${job.progress - job.skipped} posted, ${job.skipped} skipped.${titles.length ? `\nSkipped: ${titles.join(", ")}` : ""}`
         : `Publishing ${state.name} failed: ${error}`,
     );
+    this.db.prune();
   }
 
   async clearPublished(task, playlistId, save = () => {}) {
@@ -1028,6 +1027,7 @@ export class PlaylistApp extends DurableObject {
     }
     const message = cursor + 1;
     let sent;
+    let sourceMissing = false;
     if (this.scanCached(payload, message)) {
       payload.cached = (payload.cached || 0) + 1;
     } else {
@@ -1037,10 +1037,12 @@ export class PlaylistApp extends DurableObject {
         }, true);
       } catch (error) {
         if (!scanGap(error)) throw error;
+        sourceMissing = scanSourceMissing(error);
       }
       payload.requests = (payload.requests || 0) + 1;
     }
     this.db.atomic(() => {
+      if (sourceMissing) this.db.pruneSource(payload.vault, message);
       if (sent) {
         this.db.index(sent, payload.vault, message);
         pending.push(sent.message_id);

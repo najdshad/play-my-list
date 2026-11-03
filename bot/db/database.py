@@ -27,6 +27,8 @@ class Database:
             self.close()
             raise RuntimeError("Database was created by a newer version of the app")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA secure_delete=ON")
+        self.conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript((Path(__file__).with_name("schema.sql")).read_text())
         # v1 only stored a global vault, which may already have changed. Leave
@@ -36,6 +38,9 @@ class Database:
             r[1] for r in self.conn.execute("PRAGMA table_info(tracks)")
         }:
             self.conn.execute("ALTER TABLE tracks ADD COLUMN vault_chat_id INTEGER")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tracks_source ON tracks(vault_chat_id,vault_message_id)"
+        )
         if "skipped_titles" not in {
             r[1] for r in self.conn.execute("PRAGMA table_info(jobs)")
         }:
@@ -44,6 +49,11 @@ class Database:
             )
         self.conn.execute("PRAGMA user_version=2")
         self.conn.commit()
+        self.maintain()
+        # Existing databases need a one-time rebuild to enable page reclamation.
+        if self.conn.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
+            self.conn.execute("VACUUM")
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
         return self
 
     def close(self) -> None:
@@ -88,6 +98,36 @@ class Database:
             "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, str(value)),
         )
+
+    def maintain(self) -> None:
+        """Keep current data and recovery references, then reclaim free pages."""
+        with self._lock:
+            with self.transaction() as conn:
+                conn.execute("""DELETE FROM jobs WHERE status<>'running' AND id NOT IN
+                    (SELECT MAX(id) FROM jobs WHERE status<>'running' GROUP BY playlist_id)""")
+                conn.execute("""UPDATE jobs SET current_track=NULL
+                    WHERE status<>'running' AND current_track IS NOT NULL""")
+                vault = self.setting("vault_chat_id")
+                conn.execute("""DELETE FROM tracks WHERE (missing=1 OR
+                    (? IS NOT NULL AND (vault_chat_id IS NULL OR vault_chat_id<>CAST(? AS INTEGER))))
+                    AND NOT EXISTS (SELECT 1 FROM playlist_tracks WHERE track_id=tracks.id)
+                    AND NOT EXISTS (SELECT 1 FROM published_messages WHERE track_id=tracks.id)""",
+                    (vault, vault))
+                conn.execute("""DELETE FROM channels WHERE is_member=0
+                    AND chat_id<>COALESCE(CAST(? AS INTEGER),0)
+                    AND NOT EXISTS (SELECT 1 FROM playlists WHERE channel_id=channels.chat_id)
+                    AND NOT EXISTS (SELECT 1 FROM published_messages WHERE chat_id=channels.chat_id)
+                    AND NOT EXISTS (SELECT 1 FROM tracks WHERE vault_chat_id=channels.chat_id)""",
+                    (vault,))
+            self.conn.execute("PRAGMA incremental_vacuum").fetchall()
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+
+    def prune_source(self, source: int, message_id: int, keep: str | None = None) -> None:
+        self.execute("""DELETE FROM tracks WHERE vault_chat_id=? AND vault_message_id=?
+            AND (? IS NULL OR file_unique_id<>?)
+            AND NOT EXISTS (SELECT 1 FROM playlist_tracks WHERE track_id=tracks.id)
+            AND NOT EXISTS (SELECT 1 FROM published_messages WHERE track_id=tracks.id)""",
+            (source, message_id, keep, keep))
 
     def upsert_track(self, data: dict[str, Any]) -> int:
         source = self.setting("vault_chat_id")
