@@ -1,33 +1,50 @@
 # play-my-list
 
-A Telegram bot and Mini App for building ordered music playlists and publishing them as clean audio feeds in Telegram channels.
+Turn audio from a Telegram channel into ordered, publishable playlists.
 
-The bot indexes audio from a **vault channel** you choose, you arrange playlists by drag-and-drop in the Mini App, and publishing clears the bot's tracked posts and copies the tracks over in order, provided Telegram allows deleting the earlier posts.
+`play-my-list` is a Telegram bot plus a drag-and-drop Mini App. It indexes the audio already sitting in a **vault channel** you choose, lets you arrange tracks into named playlists, and publishes them as clean feeds in your **playlist channels** — deleting the bot's previous posts and copying the tracks over in order.
 
-**The bot never stores audio.** It keeps message references, `file_id`s and metadata only. Files stay in the vault channel.
-
-[`PRD.md`](PRD.md) describes the behaviour, data model and API implemented here.
-
-## Cloudflare serverless deployment
-
-The whole project can run on Cloudflare: a Worker serves the Mini App, REST API, and Telegram webhook; a SQLite-backed Durable Object stores the data and uses durable alarms for scans and publishing. No Python server or tunnel is required for that deployment.
-
-See **[`cloudflare/README.md`](cloudflare/README.md)** for configuration, local testing, deployment, and webhook registration. Use `npm ci`, `npm test`, and `npm run deploy:check` for the Cloudflare implementation. The sections below document the original Python runtime, which remains available for local development and existing installations. Cloudflare starts with a separate database; migration considerations are documented in the deployment guide.
+**The bot never stores audio.** It keeps message references, `file_id`s and metadata only. Your files stay in the vault channel.
 
 ## How it works
 
-1. **Index the vault** — `/setvault`, then forward any message from the vault channel. The bot probes the channel's message IDs by forwarding each one to your DM, saving audio metadata and deleting the forwarded copy. Interrupted scans resume on startup; `/resumescan` retries a failed scan from its saved cursor. Live indexing picks up new uploads.
-2. **Arrange playlists** — create named playlists, attach a channel, search the index, drag tracks into order. Every change saves immediately.
-3. **Publish** — the bot checks its channel rights, deletes the messages it previously posted, then copies each track from the vault (falling back to `sendAudio`). Progress is shown live and message IDs are saved as it goes, so an interrupted publish cleans up correctly next time.
+1. **Index the vault** — run `/setvault`, then forward any message from the vault channel. The bot probes the channel's message IDs, saves audio metadata, and deletes the forwarded copies. Scans resume after a restart, and `/resumescan` retries from the last saved cursor. New uploads are indexed as they arrive.
+2. **Arrange playlists** — create named playlists, attach a channel, search the index, and drag tracks into order. Every change saves immediately.
+3. **Publish** — the bot verifies its channel rights, removes the posts it published before, then copies each track from the vault (falling back to `sendAudio`). Progress is live, and message IDs are saved as it goes so an interrupted publish can clean up next time.
 
-## Requirements
+## Highlights
 
-- One owner, set by `OWNER_ID`. Everyone else is ignored.
-- A **vault channel** where the bot is admin with *Post Messages* and *Delete Messages*.
-- One or more **playlist channels** where the bot is admin with *Post Messages* and *Delete Messages*. Telegram normally limits bot deletion to messages less than 48 hours old; administrator rights do not remove that documented limit.
-- Python 3.11+, SQLite, and a public HTTPS URL for the Mini App.
+- Ordered playlists with instant saving in the Mini App.
+- Publishing replaces the previous feed instead of appending to it.
+- Per-track vault references survive playlist edits and channel moves.
+- Runs entirely on Cloudflare, or self-hosted as a single Python process.
+- One owner per bot; everyone else is ignored.
 
-## Setup
+## Quick start
+
+### Option A — Cloudflare (no server required)
+
+The Worker serves the Mini App, REST API and Telegram webhook. A SQLite-backed Durable Object stores data and runs scans and publishes via durable alarms.
+
+Requires Node.js 22+ and a Cloudflare account with Workers and SQLite-backed Durable Objects.
+
+```bash
+npm ci
+npx wrangler login
+# set vars.OWNER_ID in wrangler.jsonc
+cp .dev.vars.example .dev.vars
+# set BOT_TOKEN and WEBHOOK_SECRET in .dev.vars
+npm test
+npm run deploy:check
+npm run deploy
+npx wrangler secret bulk .dev.vars
+```
+
+Cloudflare starts with a separate database — data is not migrated from an existing Python installation. See **[`cloudflare/README.md`](cloudflare/README.md)** for the full guide, including webhook registration and GitHub Actions deployment.
+
+### Option B — Python runtime (local or VPS)
+
+Requires Python 3.11+, SQLite, and a public HTTPS URL for the Mini App.
 
 ```bash
 git clone <repo> && cd play-my-list
@@ -40,38 +57,16 @@ python -m bot.main
 Then in Telegram:
 
 1. `/setvault` and forward a message from the vault channel. Wait for the scan to finish (`/scanstatus`).
-2. Add the bot as admin to each playlist channel. It discovers them automatically.
-3. `/start` and open the Mini App to build playlists.
+2. Add the bot as an admin to each playlist channel. It discovers them automatically.
+3. `/start`, open the Mini App, and build your first playlist.
 
-## Publishing and recovery
+### Telegram setup
 
-Publishing refreshes the bot's permissions before deleting anything. Earlier posts are deleted from their recorded channels, including after a playlist moves. If cleanup fails, publishing stops, keeps tracking the undeleted messages, and shows the error. For posts older than Telegram permits deleting, remove them manually in Telegram and retry; already absent messages are skipped by Telegram.
+- A **vault channel** where the bot is an admin with *Post Messages* and *Delete Messages*.
+- One or more **playlist channels** where the bot is an admin with *Post Messages* and *Delete Messages*.
+- Your numeric user ID as `OWNER_ID`. Only that account can use the bot.
 
-Only confirmed unavailable audio files are marked missing. Permission failures and temporary outages fail the job without marking valid audio unavailable. A copy/send timeout is not retried or replaced with another send, because Telegram may already have accepted it.
-
-Each track retains its own vault channel. Changing the vault changes the search index shown in the app; existing playlists keep their source references. The vault cannot be used as a publish target. Edits are blocked during publishing, and simultaneous publishes sharing a channel are rejected to preserve ordering.
-
-Publishing an empty playlist clears its tracked posts. Do this before deleting a previously published playlist. Failed/interrupted jobs remain visible when reopening the editor. A new publish clears tracked partial output first.
-
-Telegram delivery and SQLite commits cannot be atomic: a crash or lost response after Telegram accepts a post can leave an untracked message. Inspect the channel after an ambiguous send failure and remove any extra post manually before retrying. Publishing replaces posts in batches; it is not an atomic channel swap.
-
-Existing v1 databases migrate automatically to v2, preserving playlists, file IDs, and tracked messages. Back up the database before upgrading. Since v1 cannot prove a track's original channel after vault changes, legacy tracks publish using their file IDs until `/rescan` verifies and refreshes their source references.
-
-## Configuration
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `BOT_TOKEN` | — | Bot token from @BotFather |
-| `OWNER_ID` | — | Your Telegram user ID |
-| `DATABASE_PATH` | `data/playlist_bot.db` | SQLite file |
-| `WEB_APP_URL` | — | Public HTTPS URL of the Mini App |
-| `WEB_APP_HOST` | `0.0.0.0` | Bind address |
-| `WEB_APP_PORT` | `8080` | Bind port |
-| `PUBLISH_DELAY_SECONDS` | `3.0` | Pause between published tracks (~20 messages/min) |
-| `SCAN_DELAY_SECONDS` | `1.0` | Pause between scan forwards (~1 message/s) |
-| `LOG_LEVEL` | `INFO` | Logging level |
-
-429 responses are always honored via `retry_after`, so the delays above are floors, not guarantees.
+Telegram normally allows bots to delete only messages posted within the last 48 hours. Administrator rights do not lift that limit.
 
 ## Commands
 
@@ -86,7 +81,39 @@ Existing v1 databases migrate automatically to v2, preserving playlists, file ID
 | `/list` | Playlists with track counts and channels |
 | `/publish <name>` | Publish a playlist |
 
-## Development and tests
+## Configuration
+
+Python runtime, via `.env`:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_TOKEN` | — | Bot token from @BotFather |
+| `OWNER_ID` | — | Your Telegram user ID |
+| `DATABASE_PATH` | `data/playlist_bot.db` | SQLite file |
+| `WEB_APP_URL` | — | Public HTTPS URL of the Mini App |
+| `WEB_APP_HOST` | `0.0.0.0` | Bind address |
+| `WEB_APP_PORT` | `8080` | Bind port |
+| `PUBLISH_DELAY_SECONDS` | `3.0` | Pause between published tracks (~20 messages/min) |
+| `SCAN_DELAY_SECONDS` | `1.0` | Pause between scan forwards (~1 message/s) |
+| `LOG_LEVEL` | `INFO` | Logging level |
+
+Telegram 429 responses are always honored via `retry_after`, so these delays are floors, not guarantees. Cloudflare configuration lives in `wrangler.jsonc` and Worker secrets; see the [Cloudflare guide](cloudflare/README.md).
+
+## Publishing, in practice
+
+- Publishing refreshes the bot's permissions first, then deletes tracked posts from the channels where they were actually recorded — including after a playlist moves.
+- If cleanup fails, publishing stops, keeps tracking the undeleted messages, and shows the error. Remove posts older than the deletion limit manually and retry; already-absent messages are skipped.
+- Only confirmed-unavailable audio is marked missing. Permission failures and temporary outages fail the job without marking valid tracks unavailable. Copy/send timeouts are never retried blindly, because Telegram may already have accepted the post.
+- Telegram delivery and SQLite commits cannot be atomic. After an ambiguous send failure, inspect the channel and remove any extra post manually before retrying. Publishing replaces posts in batches; it is not an atomic channel swap.
+- Each track keeps its own vault channel. Changing the vault changes the search index shown in the app; existing playlists keep their source references. The vault cannot be a publish target.
+- Edits are blocked during publishing, and simultaneous publishes sharing a channel are rejected to preserve ordering.
+- Publishing an empty playlist clears its tracked posts. Do this before deleting a playlist that was previously published. Failed or interrupted jobs stay visible when you reopen the editor, and a new publish clears partial output first.
+
+### Upgrading from v1
+
+Existing v1 databases migrate automatically to v2, preserving playlists, file IDs and tracked messages. **Back up the database before upgrading.** Because v1 cannot prove a track's original channel after vault changes, legacy tracks publish using their file IDs until `/rescan` refreshes their source references.
+
+## Development
 
 ```bash
 pip install -e '.[dev]'
@@ -95,27 +122,19 @@ python -m build
 node --check miniapp/app.js
 ```
 
-The backend tests use temporary SQLite databases, signed test sessions, and simulated Telegram calls. They cover API editing/publishing, authentication, schema migration, retries, permissions, channel moves, vault changes, and restart/shutdown recovery.
+Backend tests use temporary SQLite databases, signed test sessions and simulated Telegram calls. They cover API editing and publishing, authentication, schema migration, retries, permissions, channel moves, vault changes, and restart/shutdown recovery.
 
-For browser smoke tests, install Chrome and `agent-browser` (or use `npx`). Start a fresh local fixture server in one terminal, then run the browser test in another:
+Browser smoke tests need Chrome and `agent-browser`:
 
 ```bash
 python tests/browser_server.py
-# In another terminal:
+# in another terminal
 python tests/browser_smoke.py
 ```
 
-Set `AGENT_BROWSER_EXECUTABLE_PATH` if Chrome is in a custom location. Install `agent-browser` globally or set `AGENT_BROWSER_BIN` to its native executable to avoid repeated `npx` startup overhead. The fixture binds only to `127.0.0.1:8765`, uses a temporary database and fake Telegram, and never reads `.env`. It tests the real Mini App and REST API together. Close the browser with `npx agent-browser --session playlist-review close` afterward.
+Set `AGENT_BROWSER_EXECUTABLE_PATH` if Chrome is in a custom location, or `AGENT_BROWSER_BIN` to point at a native `agent-browser` executable. The fixture binds only to `127.0.0.1:8765`, uses a temporary database and fake Telegram, and never reads `.env`. Close the browser afterward with `npx agent-browser --session playlist-review close`.
 
-## Deployment
-
-One asyncio process: aiogram polling for the bot, aiohttp for the Mini App and REST API, SQLite in WAL mode. No external services besides Telegram.
-
-Run it with Docker or systemd behind Caddy for automatic HTTPS, and back up the database daily:
-
-```bash
-sqlite3 data/playlist_bot.db ".backup 'backup/playlist_bot-$(date +%F).db'"
-```
+Cloudflare tests run with `npm test`.
 
 ## Project layout
 
@@ -127,16 +146,15 @@ bot/
   handlers/          commands, vault setup, channel membership
   api/               REST routes and initData auth
   services/          scanner, publisher, auth
+cloudflare/          Worker, Durable Object, deployment guide
 miniapp/             index.html, app.js, style.css (no build step)
-tests/
-data/
+tests/               backend and browser tests
 ```
 
-The `playlist-bot/` prefix in the PRD is the project root; paths here are relative to it.
+## Documentation
 
-## Docs
-
-- [`PRD.md`](PRD.md) — full spec: workflows, data model, API contract, error handling, out-of-scope items, open risks.
+- [`PRD.md`](PRD.md) — full specification: workflows, data model, API contract, error handling, out-of-scope items and open risks.
+- [`cloudflare/README.md`](cloudflare/README.md) — Cloudflare setup, local testing, deployment and webhook registration.
 
 ## License
 
