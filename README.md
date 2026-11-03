@@ -24,7 +24,7 @@ Turn audio from a Telegram channel into ordered, publishable playlists.
 
 ### Option A — Cloudflare (no server required)
 
-The Worker serves the Mini App, REST API and Telegram webhook. A SQLite-backed Durable Object stores data and runs scans and publishes via durable alarms.
+The Worker serves the Mini App, REST API and Telegram webhook. A SQLite-backed Durable Object stores data and runs scans and publishes via durable alarms. Cloudflare supports `/syncvault` for incremental checks, `/rescan` for a full metadata refresh, and `/resumescan` for recovery. Publishing defaults to 1.1 seconds between posts, with persistent per-chat cooldowns; see [Cloudflare operations](cloudflare/README.md#operations-and-recovery).
 
 Requires Node.js 22+ and a Cloudflare account with Workers and SQLite-backed Durable Objects.
 

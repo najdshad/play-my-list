@@ -14,7 +14,7 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PlaylistApp"] }],
   "vars": {
     "OWNER_ID": "1078676262",
-    "PUBLISH_DELAY_SECONDS": "3",
+    "PUBLISH_DELAY_SECONDS": "1.1",
     "SCAN_DELAY_SECONDS": "1",
   },
   "observability": { "enabled": true },

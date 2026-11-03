@@ -7,6 +7,7 @@ const commands = [
   { command: "start", description: "Open the playlist app" },
   { command: "setvault", description: "Choose the vault channel" },
   { command: "scanstatus", description: "Show scan progress" },
+  { command: "syncvault", description: "Check the vault for new tracks" },
   { command: "rescan", description: "Rescan the vault from the start" },
   { command: "resumescan", description: "Resume a failed scan" },
   { command: "newplaylist", description: "Create a playlist by name" },

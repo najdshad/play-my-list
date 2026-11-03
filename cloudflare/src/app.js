@@ -17,9 +17,7 @@ import {
   invalidAudio,
 } from "./telegram.js";
 
-// Forwards are sequential inside one alarm; keep each alarm short and let the
-// next batch continue after SCAN_DELAY_SECONDS.
-const SCAN_BATCH = 10;
+const CLEANUP_BATCH = 10;
 
 export class PlaylistApp extends DurableObject {
   constructor(ctx, env) {
@@ -72,17 +70,60 @@ export class PlaylistApp extends DurableObject {
   }
 
   async schedule() {
-    const next = this.db.one("SELECT MIN(due_at) due FROM tasks");
-    if (next?.due === null || next?.due === undefined) {
+    const next = this.nextTask();
+    if (!next) {
       await this.ctx.storage.deleteAlarm();
       return;
     }
     const due = Math.max(
-      next.due,
-      Number(this.db.setting("bot_not_before", "0")),
+      next.eligible,
       Date.now() + 1,
     );
     await this.ctx.storage.setAlarm(due);
+  }
+
+  pacing(chat) {
+    const floor = String(chat) === String(this.env.OWNER_ID)
+      ? Math.max(1100, Number(this.env.SCAN_DELAY_SECONDS ?? 1) * 1000)
+      : Number(this.env.PUBLISH_DELAY_SECONDS ?? 1.1) * 1000;
+    const saved = JSON.parse(this.db.setting(`chat_pacing:${chat}`, "{}"));
+    return { until: 0, successes: 0, ...saved,
+      interval: Math.max(floor, saved.interval || 0), floor };
+  }
+
+  scanCached(payload, message) {
+    return payload.mode === "sync" && !!this.db.one(
+      "SELECT 1 FROM tracks WHERE vault_chat_id=? AND vault_message_id=? AND missing=0",
+      payload.vault, message,
+    );
+  }
+
+  taskChat(task) {
+    const payload = JSON.parse(task.payload);
+    if (task.kind === "notification") return payload.chat_id;
+    if (task.kind === "scan") {
+      const cursor = Number(this.db.setting("scan_cursor", "0"));
+      const pending = JSON.parse(this.db.setting("scan_pending", "[]"));
+      if (cursor < payload.max && pending.length < CLEANUP_BATCH &&
+          !this.scanCached(payload, cursor + 1)) return Number(this.env.OWNER_ID);
+    }
+    if (task.kind === "publish") {
+      const job = this.db.one("SELECT * FROM jobs WHERE id=?", payload.job);
+      if (job?.status === "running") {
+        const state = JSON.parse(job.state);
+        if (state.phase === "send" && job.progress < job.total) return state.chat;
+      }
+    }
+    return null;
+  }
+
+  nextTask() {
+    const global = Number(this.db.setting("bot_not_before", "0"));
+    return this.db.all("SELECT * FROM tasks").map((task) => {
+      const chat = this.taskChat(task);
+      return { ...task, eligible: Math.max(task.due_at, global,
+        chat === null ? 0 : this.pacing(chat).until) };
+    }).sort((a, b) => a.eligible - b.eligible || a.due_at - b.due_at || a.id - b.id)[0];
   }
 
   playlist(id, editable = false) {
@@ -295,10 +336,11 @@ export class PlaylistApp extends DurableObject {
   }
 
   cancel() {
-    const tasks = this.db.all("SELECT kind,inflight FROM tasks");
+    const tasks = this.db.all("SELECT kind,inflight,payload FROM tasks");
     const jobs = this.db.all("SELECT id FROM jobs WHERE status='running'");
     const scanning = this.db.setting("scan_state") === "running";
-    const pending = this.db.setting("pending_vault") === "1";
+    const pending = this.db.setting("pending_vault") === "1" ||
+      this.db.setting("pending_sync") === "1";
     if (!tasks.length && !jobs.length && !scanning && !pending) {
       this.notify("Nothing to cancel.");
       return;
@@ -315,10 +357,13 @@ export class PlaylistApp extends DurableObject {
       });
       this.db.exec("DELETE FROM tasks");
       if (scanning) {
+        const scan = tasks.find((task) => task.kind === "scan");
+        if (scan) this.db.set("scan_resume", scan.payload);
         this.db.set("scan_state", "idle");
         this.db.set("scan_error", "");
       }
       this.db.set("pending_vault", "0");
+      this.db.set("pending_sync", "0");
     });
     const interrupted = tasks.find(
       (task) => task.inflight && task.kind !== "notification",
@@ -334,10 +379,11 @@ export class PlaylistApp extends DurableObject {
     );
   }
 
-  startScan(vault, reset = false, max = 0) {
+  startScan(vault, reset = false, max = 0, mode = "full") {
     if (this.scanBusy())
       throw new AppError("A scan is already running.", 409, "already_running");
     const changed = this.db.setting("vault_chat_id") !== String(vault);
+    const checkpoint = this.db.checkpoint(vault);
     if (reset || changed) {
       const indexed = Number(
         this.db.one(
@@ -360,13 +406,23 @@ export class PlaylistApp extends DurableObject {
     let resume = null;
     if (!reset && !changed)
       resume = JSON.parse(this.db.setting("scan_resume", "null"));
+    if (mode === "sync") {
+      this.db.set("scan_cursor", checkpoint);
+      this.db.set("scan_max_id", Math.max(max, checkpoint));
+      resume = null;
+    }
     this.db.set("vault_chat_id", vault);
     this.db.set("scan_state", "running");
     this.db.set("scan_error", "");
     this.db.set("scan_resume", "null");
+    this.db.set("pending_sync", "0");
     this.db.enqueue("scan", resume || {
       vault,
       max: Number(this.db.setting("scan_max_id", "0")),
+      mode,
+      started_at: Date.now(),
+      requests: 0,
+      cached: 0,
     });
   }
 
@@ -410,10 +466,22 @@ export class PlaylistApp extends DurableObject {
           return;
         }
         case "/setvault":
+          this.db.set("pending_sync", "0");
           this.db.set("pending_vault", "1");
           this.notify(
             "Forward the newest message from the vault channel to me.",
           );
+          return;
+        case "/syncvault":
+          if (!this.db.setting("vault_chat_id"))
+            throw new AppError("Set a vault first with /setvault.");
+          if (this.scanBusy())
+            throw new AppError("A scan is already running.");
+          if (this.db.setting("scan_state") === "error")
+            throw new AppError("Recover the failed scan with /resumescan first, or use /rescan for a full refresh.");
+          this.db.set("pending_vault", "0");
+          this.db.set("pending_sync", "1");
+          this.notify("Forward the newest message from the configured vault to check for new tracks.");
           return;
         case "/scanstatus":
           this.notify(
@@ -457,7 +525,8 @@ export class PlaylistApp extends DurableObject {
           this.cancel();
           return;
       }
-      if (message.forward_origin && this.db.setting("pending_vault") === "1") {
+      if (message.forward_origin && (this.db.setting("pending_vault") === "1" ||
+          this.db.setting("pending_sync") === "1")) {
         const chat = message.forward_origin.chat;
         if (!chat || chat.type !== "channel")
           throw new AppError("That message does not identify a channel.");
@@ -468,6 +537,14 @@ export class PlaylistApp extends DurableObject {
           throw new AppError(
             "A scan is already running. Wait for it to finish.",
           );
+        if (this.db.setting("pending_sync") === "1") {
+          if (String(chat.id) !== this.db.setting("vault_chat_id"))
+            throw new AppError("Forward a message from the configured vault channel.");
+          this.startScan(chat.id, false, max, "sync");
+          this.db.set("pending_sync", "0");
+          this.notify("Vault synchronization started. Use /scanstatus for progress.");
+          return;
+        }
         this.assertVault(chat.id);
         this.db.enqueue("select_vault", { vault: chat.id, phase: "chat", max });
       }
@@ -544,13 +621,44 @@ export class PlaylistApp extends DurableObject {
 
   async call(task, method, parameters, unsafe = false) {
     if (unsafe) {
-      this.db.exec("UPDATE tasks SET inflight=? WHERE id=?", method, task.id);
+      this.db.atomic(() => {
+        this.db.exec("UPDATE tasks SET inflight=? WHERE id=?", method, task.id);
+        // An uncertain request may have delivered a message. Reserve its chat
+        // interval too, so recovery notifications cannot immediately follow it.
+        const pacing = this.pacing(parameters.chat_id);
+        pacing.until = Math.max(pacing.until, Date.now() + pacing.interval);
+        this.db.set(`chat_pacing:${parameters.chat_id}`, JSON.stringify(pacing));
+      });
       // Make the intent durable before making a non-idempotent external request.
       await this.ctx.storage.sync();
     }
+    const started = Date.now();
+    let code = 200;
     try {
-      return await telegram(this.env.BOT_TOKEN, method, parameters);
+      const result = await telegram(this.env.BOT_TOKEN, method, parameters);
+      if (unsafe) {
+        const pacing = this.pacing(parameters.chat_id);
+        pacing.successes++;
+        if (pacing.successes >= 20) {
+          pacing.interval = pacing.floor;
+          pacing.successes = 0;
+        }
+        pacing.until = Date.now() + pacing.interval;
+        this.db.set(`chat_pacing:${parameters.chat_id}`, JSON.stringify(pacing));
+      }
+      return result;
     } catch (error) {
+      code = error instanceof TelegramError ? error.code : 0;
+      if (error instanceof TelegramError && error.retryAfter !== null &&
+          parameters.chat_id !== undefined) {
+        const pacing = this.pacing(parameters.chat_id);
+        pacing.interval = Math.min(Math.max(5000, pacing.floor), pacing.interval * 2);
+        pacing.successes = 0;
+        pacing.until = Date.now() + pacing.interval;
+        this.db.set(`chat_pacing:${parameters.chat_id}`, JSON.stringify(pacing));
+        console.log(JSON.stringify({ event: "telegram_flood_wait", kind: task.kind,
+          method, retry_after: error.retryAfter, interval_ms: pacing.interval }));
+      }
       if (
         error instanceof TelegramError &&
         error.code >= 400 &&
@@ -558,18 +666,18 @@ export class PlaylistApp extends DurableObject {
       )
         this.db.exec("UPDATE tasks SET inflight=NULL WHERE id=?", task.id);
       throw error;
+    } finally {
+      console.log(JSON.stringify({ event: "telegram_request", kind: task.kind,
+        method, duration_ms: Date.now() - started, requests: 1, code }));
     }
   }
 
   async alarm() {
     return this.ctx.blockConcurrencyWhile(async () => {
-      const task = this.db.one(
-        "SELECT * FROM tasks ORDER BY due_at,id LIMIT 1",
-      );
+      const task = this.nextTask();
       if (!task) return;
       if (
-        task.due_at > Date.now() ||
-        Number(this.db.setting("bot_not_before", "0")) > Date.now()
+        task.eligible > Date.now()
       ) {
         await this.schedule();
         return;
@@ -589,7 +697,6 @@ export class PlaylistApp extends DurableObject {
         else if (task.kind === "notification") {
           await this.call(task, "sendMessage", payload, true);
           this.db.exec("DELETE FROM tasks WHERE id=?", task.id);
-          this.db.set("bot_not_before", Date.now() + 1000);
         }
       } catch (error) {
         if (error instanceof TelegramError && error.retryAfter !== null) {
@@ -814,11 +921,7 @@ export class PlaylistApp extends DurableObject {
         job.id,
       );
       state.fallback = false;
-      save(Number(this.env.PUBLISH_DELAY_SECONDS ?? 3) * 1000);
-      this.db.set(
-        "bot_not_before",
-        Date.now() + Number(this.env.PUBLISH_DELAY_SECONDS ?? 3) * 1000,
-      );
+      save();
       if ((job.progress + 1) % 10 === 0 && job.progress + 1 < job.total)
         this.notify(
           `Publishing ${state.name}: ${job.progress + 1}/${job.total}, skipped ${titles.length}`,
@@ -872,52 +975,56 @@ export class PlaylistApp extends DurableObject {
 
   async scanStep(task, payload) {
     const owner = Number(this.env.OWNER_ID);
-    const delay = Number(this.env.SCAN_DELAY_SECONDS ?? 1) * 1000;
-    await this.flushForwarded(task, owner);
     const max = Number(payload.max ?? this.db.setting("scan_max_id", "0"));
     const cursor = Number(this.db.setting("scan_cursor", "0"));
-    const end = Math.min(max, cursor + SCAN_BATCH);
-    const forwarded = [];
-    let failure = null;
-    // shortcut: a crash mid-batch leaves up to SCAN_BATCH copies in the DM.
-    for (let message = cursor + 1; message <= end; message++) {
-      let sent;
-      try {
-        sent = await this.call(
-          task,
-          "forwardMessage",
-          { chat_id: owner, from_chat_id: payload.vault, message_id: message },
-          true,
-        );
-      } catch (error) {
-        if (!scanGap(error)) {
-          failure = error;
-          break;
-        }
-        continue;
-      }
-      this.db.index(sent, payload.vault, message);
-      forwarded.push(sent.message_id);
+    const pending = JSON.parse(this.db.setting("scan_pending", "[]"));
+    // Cleanup is a separate, idempotent request. Never forward in this step.
+    if (pending.length >= CLEANUP_BATCH || (cursor >= max && pending.length)) {
+      await this.flushForwarded(task, owner);
+      payload.requests = (payload.requests || 0) + 1;
+      this.db.updateTask(task, payload);
+      return;
     }
-    if (forwarded.length) this.db.set("scan_pending", JSON.stringify(forwarded));
-    // The forwards landed; a failed cleanup must retry as cleanup, not as an
-    // ambiguous send.
-    this.db.exec("UPDATE tasks SET inflight=NULL WHERE id=?", task.id);
-    await this.flushForwarded(task, owner);
-    if (failure) throw failure;
-    this.db.atomic(() => {
-      this.db.set("scan_cursor", String(end));
-      if (end >= max) {
+    if (cursor >= max) {
+      this.db.atomic(() => {
         this.db.exec("DELETE FROM tasks WHERE id=?", task.id);
         this.db.set("scan_state", "done");
         this.db.set("scan_error", "");
         this.notify(
           `Vault scan finished. Indexed ${this.db.one("SELECT COUNT(*) n FROM tracks WHERE vault_chat_id=?", payload.vault).n} tracks.`,
         );
-        return;
+      });
+      console.log(JSON.stringify({ event: "scan_finished", mode: payload.mode || "full",
+        duration_ms: Date.now() - (payload.started_at || Date.now()),
+        requests: payload.requests || 0, cached: payload.cached || 0, cursor }));
+      return;
+    }
+    const message = cursor + 1;
+    let sent;
+    if (this.scanCached(payload, message)) {
+      payload.cached = (payload.cached || 0) + 1;
+    } else {
+      try {
+        sent = await this.call(task, "forwardMessage", {
+          chat_id: owner, from_chat_id: payload.vault, message_id: message,
+        }, true);
+      } catch (error) {
+        if (!scanGap(error)) throw error;
       }
-      this.db.updateTask(task, payload, delay);
-      this.db.set("bot_not_before", Date.now() + delay);
+      payload.requests = (payload.requests || 0) + 1;
+    }
+    this.db.atomic(() => {
+      if (sent) {
+        this.db.index(sent, payload.vault, message);
+        pending.push(sent.message_id);
+        this.db.set("scan_pending", JSON.stringify(pending));
+      }
+      this.db.set("scan_cursor", message);
+      const checkpoint = this.db.checkpoint(payload.vault);
+      if (message <= checkpoint + 1)
+        this.db.set(`scan_checkpoint:${payload.vault}`, Math.max(checkpoint, message));
+      // Metadata, cleanup tracking, coverage and cleared intent commit together.
+      this.db.updateTask(task, payload);
     });
   }
 }

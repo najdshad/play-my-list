@@ -2,7 +2,7 @@
 
 The Mini App, REST API, Telegram webhook, database, and background jobs run on Cloudflare. No Python process, VPS, tunnel, D1 database, or audio storage is needed for this deployment.
 
-The Worker serves the existing `miniapp/` assets and authenticates API requests using Telegram's signed `initData`. One SQLite-backed Durable Object holds the owner's playlists, tracks, channel permissions, message tracking, webhook deduplication records, and pending work. Durable Object alarms advance scans and publishes; scans forward a short batch per alarm and clean each batch with one `deleteMessages` call, while publishing keeps one Telegram request per step. Delays and flood waits are persisted instead of sleeping in a request handler.
+The Worker serves the existing `miniapp/` assets and authenticates API requests using Telegram's signed `initData`. One SQLite-backed Durable Object holds the owner's playlists, tracks, channel permissions, message tracking, webhook deduplication records, and pending work. Durable Object alarms advance scans and publishes with at most one Telegram request per step. Each confirmed scan forward saves its metadata and cursor immediately; cleanup uses one `deleteMessages` call after ten forwards or at completion. Delays and flood waits are persisted instead of sleeping in a request handler.
 
 ## Current deployment
 
@@ -110,11 +110,21 @@ npx wrangler tail
 npm run telegram:status
 ```
 
-Send `/cancel` to stop any running scan or publish. Cancelling a publish keeps its already-posted messages tracked, so publishing again cleans them up; cancelling a scan may leave a batch of temporary forwarded copies in the bot chat, which the next scan deletes before continuing.
+Send `/cancel` to stop any running scan or publish. Cancelling a publish keeps its already-posted messages tracked, so publishing again cleans them up; cancelling a scan retains temporary forwarded-copy IDs for cleanup when scanning resumes.
 
 The database and pending tasks survive Worker requests, eviction, and deployments. Do not delete the Durable Object namespace or change the owner ID/name mapping to reset the app: that selects a different database. The deployment migration creates storage; future schema changes require a migration rather than dropping tables.
 
-Scan failures retain their cursor, and a batch's confirmed forwarded-message IDs stay in `scan_pending` until they are deleted. Use `/resumescan` to continue, or `/rescan` to restart from the beginning. Permission failures never become skipped message IDs.
+Use `/syncvault` to check for new tracks: forward the newest message from the configured vault when prompted. Forwards from other channels are rejected. Synchronization starts after that vault's persistent coverage checkpoint, including previously checked gaps and non-audio messages. Matching tracks already indexed from live channel updates are reused within the new range. A high live message ID alone never advances coverage. The forwarded upper bound stays fixed for that run.
+
+Use `/rescan` for a full metadata refresh, including cached tracks, or `/resumescan` for recovery. Each confirmed forward atomically saves metadata, cleanup IDs, cursor progress, and the cleared in-flight marker. Scan failures retain this progress; confirmed forwarded-message IDs stay in `scan_pending` until deletion succeeds. Permission failures never become skipped message IDs. After an ambiguous forward, inspect the DM and remove any untracked extra copy before explicitly resuming.
+
+Checkpoints and destination pacing live in the existing settings storage. On upgrade, coverage for the current vault starts at its saved scan cursor; existing pending jobs remain intact. Each vault retains its own checkpoint when switching vaults.
+
+`PUBLISH_DELAY_SECONDS` defaults to `1.1` seconds and honors explicit overrides. `SCAN_DELAY_SECONDS` sets the owner-chat interval, with a minimum of `1.1` seconds between owner messages, including scan forwards and notifications. Normal cooldowns are persisted per destination: a waiting owner chat or channel does not block eligible work elsewhere. Alarms wake for the earliest eligible task. A Telegram `429` still pauses the whole bot for `retry_after`; the affected chat's interval doubles up to the greater of five seconds or its configured floor. Twenty successful sends restore that floor. Channel locks and sequential playlist jobs preserve individual posts in playlist order.
+
+For 100 tracks, the default configured publishing pauses are about 109 seconds, down from about 297 seconds, before request time and flood waits. Initial metadata scans still need individual forwards because bulk forwarding returns message IDs without full audio metadata. A 1,000-ID initial scan needs 1,000 metadata requests; synchronization over the next 20 IDs inspects only those 20 and makes no metadata request for live-indexed tracks. Tests benchmark this case with ten live-indexed tracks: ten forwards and one cleanup request.
+
+Structured logs record Telegram request methods, counts, durations, flood waits, and scan cache reuse. They omit tokens, request URLs, and message contents.
 
 Publish failures preserve tracked output. Retry publishing to clean up partial posts first. If old posts cannot be deleted, remove them manually in Telegram and retry. The bot cannot bypass Telegram's deletion limits.
 

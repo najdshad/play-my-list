@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS channels (chat_id INTEGER PRIMARY KEY,title TEXT NOT NULL DEFAULT '',can_post INTEGER NOT NULL DEFAULT 0,can_delete INTEGER NOT NULL DEFAULT 0,is_member INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tracks (id INTEGER PRIMARY KEY AUTOINCREMENT,file_unique_id TEXT NOT NULL UNIQUE,file_id TEXT NOT NULL,vault_message_id INTEGER NOT NULL,vault_chat_id INTEGER,title TEXT,performer TEXT,file_name TEXT,duration INTEGER NOT NULL DEFAULT 0,file_size INTEGER NOT NULL DEFAULT 0,missing INTEGER NOT NULL DEFAULT 0,indexed_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_tracks_search ON tracks(title,performer,file_name);
+CREATE INDEX IF NOT EXISTS idx_tracks_source ON tracks(vault_chat_id,vault_message_id);
 CREATE TABLE IF NOT EXISTS playlists (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,channel_id INTEGER REFERENCES channels(chat_id) ON DELETE SET NULL,last_published_at TEXT,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS playlist_tracks (playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,position INTEGER NOT NULL,PRIMARY KEY(playlist_id,track_id),UNIQUE(playlist_id,position));
 CREATE TABLE IF NOT EXISTS published_messages (id INTEGER PRIMARY KEY AUTOINCREMENT,playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,published_at TEXT NOT NULL);
@@ -24,6 +25,8 @@ export class Store {
     if (version > 1)
       throw new Error("Database was created by a newer version of the app.");
     this.set("schema_version", "1");
+    const vault = this.setting("vault_chat_id");
+    if (vault !== null) this.checkpoint(vault);
   }
   all(query, ...values) {
     return this.sql.exec(query, ...values).toArray();
@@ -48,6 +51,13 @@ export class Store {
       key,
       String(value),
     );
+  }
+  checkpoint(vault) {
+    const key = `scan_checkpoint:${vault}`;
+    if (this.setting(key) === null)
+      this.set(key, String(vault) === this.setting("vault_chat_id")
+        ? Number(this.setting("scan_cursor", "0")) : 0);
+    return Number(this.setting(key));
   }
   tracks(pid) {
     return this.all(

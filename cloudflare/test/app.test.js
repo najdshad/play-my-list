@@ -88,14 +88,17 @@ async function step() {
     if (!app.db.one("SELECT 1 FROM tasks")) return false;
     app.db.exec("UPDATE tasks SET due_at=0");
     app.db.set("bot_not_before", "0");
+    for (const row of app.db.all("SELECT key,value FROM settings WHERE key LIKE 'chat_pacing:%'")) {
+      app.db.set(row.key, JSON.stringify({ ...JSON.parse(row.value), until: 0 }));
+    }
     await app.alarm();
     return true;
   });
 }
 
 async function drain() {
-  for (let i = 0; i < 100; i++) if (!(await step())) return;
-  throw new Error("Jobs did not finish after 100 alarm steps");
+  for (let i = 0; i < 3000; i++) if (!(await step())) return;
+  throw new Error("Jobs did not finish after 3000 alarm steps");
 }
 
 async function seed() {
@@ -136,6 +139,7 @@ beforeEach(async () => {
   nextMessage = 100;
   authorization = await signed();
   stub = env.PLAYLISTS.get(env.PLAYLISTS.idFromName("owner:7"));
+  vi.spyOn(console, "log").mockImplementation(() => {});
   await inside((app) => {
     app.schedule = async () => {};
   });
@@ -777,7 +781,7 @@ describe("durable vault scanning", () => {
         : null;
     await inside((app) => app.startScan(-9001, true, 1));
     await drain();
-    expect(await inside((app) => app.db.setting("scan_cursor"))).toBe("0");
+    expect(await inside((app) => app.db.setting("scan_cursor"))).toBe("1");
     expect(await inside((app) => app.db.setting("scan_pending"))).toBe("[2]");
     fail = null;
     await command("/resumescan");
@@ -793,7 +797,7 @@ describe("durable vault scanning", () => {
     expect(await inside((app) => app.db.setting("scan_state"))).toBe("done");
     expect(await inside((app) => app.db.setting("scan_cursor"))).toBe("1");
     expect(await inside((app) => app.db.setting("scan_pending"))).toBe("[]");
-    expect(calls.filter((c) => c.method === "forwardMessage")).toHaveLength(2);
+    expect(calls.filter((c) => c.method === "forwardMessage")).toHaveLength(1);
   }, 20000);
 
   it("rejects protected vaults without changing the selected vault", async () => {
@@ -813,5 +817,350 @@ describe("durable vault scanning", () => {
       "-9001",
     );
     expect(await inside((app) => app.db.setting("pending_vault"))).toBe("1");
+  });
+});
+
+async function syncTo(max, update = 100) {
+  await command("/syncvault", update);
+  await command("", update + 1, {
+    forward_origin: { chat: { id: -9001, type: "channel" }, message_id: max },
+  });
+}
+
+describe("incremental synchronization", () => {
+  it("requires the configured vault and rejects another channel's bound", async () => {
+    await command("/syncvault");
+    expect(await inside((app) => app.db.setting("pending_sync"))).toBe(null);
+    await inside((app) => app.db.set("vault_chat_id", -9001));
+    await command("/syncvault", 2);
+    await command("", 3, {
+      forward_origin: { chat: { id: -9002, type: "channel" }, message_id: 20 },
+    });
+    expect(await inside((app) => app.scanBusy())).toBe(false);
+    expect(await inside((app) => app.db.setting("pending_sync"))).toBe("1");
+    await drain();
+    expect(calls.some((c) => c.text?.includes("configured vault channel"))).toBe(true);
+  });
+
+  it("covers gaps and non-audio, reuses live audio, and keeps a fixed bound", async () => {
+    await inside((app) => {
+      app.db.set("vault_chat_id", -9001);
+      app.db.set("scan_cursor", 2);
+    });
+    await webhook({ update_id: 10, channel_post: {
+      chat: { id: -9001 }, message_id: 4,
+      audio: { file_unique_id: "live", file_id: "live-file" },
+    } });
+    fail = (method, input) => method === "forwardMessage" && input.message_id === 3
+      ? { error_code: 400, description: "message to forward not found" } : null;
+    const original = vi.mocked(fetch).getMockImplementation();
+    vi.mocked(fetch).mockImplementation(async (url, options) => {
+      const result = await original(url, options);
+      if (String(url).endsWith("/forwardMessage") && JSON.parse(options.body).message_id === 5)
+        return Response.json({ ok: true, result: { message_id: ++nextMessage, text: "No audio" } });
+      return result;
+    });
+    await syncTo(5);
+    await webhook({ update_id: 200, channel_post: {
+      chat: { id: -9001 }, message_id: 9,
+      audio: { file_unique_id: "later", file_id: "later-file" },
+    } });
+    await drain();
+    expect(calls.filter((c) => c.method === "forwardMessage").map((c) => c.message_id)).toEqual([3, 5]);
+    expect(await inside((app) => app.db.checkpoint(-9001))).toBe(5);
+    await syncTo(5, 300);
+    await drain();
+    expect(calls.filter((c) => c.method === "forwardMessage")).toHaveLength(2);
+    expect(await inside((app) => app.db.checkpoint(-9001))).toBe(5);
+  });
+
+  it("never infers coverage from indexed tracks and fully refreshes on rescan", async () => {
+    await seed();
+    await syncTo(3);
+    await drain();
+    expect(calls.filter((c) => c.method === "forwardMessage")).toHaveLength(0);
+    expect(await inside((app) => app.db.checkpoint(-9001))).toBe(3);
+    await command("/rescan", 200);
+    await drain();
+    expect(calls.filter((c) => c.method === "forwardMessage").map((c) => c.message_id)).toEqual([1, 2, 3]);
+    expect(await inside((app) => app.db.checkpoint(-9001))).toBe(3);
+  });
+
+  it("retains confirmed metadata and coverage when a later forward fails", async () => {
+    await inside((app) => app.startScan(-9001, true, 3));
+    fail = (method, input) => method === "forwardMessage" && input.message_id === 2
+      ? new Error("offline") : null;
+    await drain();
+    expect(await inside((app) => app.db.checkpoint(-9001))).toBe(1);
+    expect(await inside((app) => app.db.setting("scan_pending"))).toBe("[101]");
+    expect((await api("GET", "/tracks"))).toHaveLength(1);
+    fail = null;
+    await command("/resumescan");
+    await drain();
+    expect(calls.filter((c) => c.method === "forwardMessage").map((c) => c.message_id)).toEqual([1, 2, 2, 3]);
+    expect(await inside((app) => app.db.checkpoint(-9001))).toBe(3);
+  });
+
+  it("retains each confirmed forward through eviction and cleans only after ten", async () => {
+    await inside((app) => app.startScan(-9001, true, 11));
+    for (let i = 0; i < 9; i++) {
+      const count = calls.length;
+      await step();
+      expect(calls.length - count).toBe(1);
+    }
+    expect(calls.some((c) => c.method === "deleteMessages")).toBe(false);
+    await inside((app) => app.db.exec("UPDATE tasks SET due_at=?", Date.now() + 3600000));
+    await evictDurableObject(stub);
+    await inside((app) => { app.schedule = async () => {}; });
+    await step();
+    expect(calls.at(-1).method).toBe("forwardMessage");
+    await step();
+    expect(calls.at(-1).message_ids).toHaveLength(10);
+    await drain();
+    expect(calls.filter((c) => c.method === "forwardMessage").map((c) => c.message_id))
+      .toEqual(Array.from({ length: 11 }, (_, i) => i + 1));
+    expect(await inside((app) => app.db.checkpoint(-9001))).toBe(11);
+  }, 20000);
+
+  it("stops an uncertain forward after eviction without replaying it", async () => {
+    await inside((app) => {
+      app.startScan(-9001, true, 2);
+      app.db.exec("UPDATE tasks SET inflight='forwardMessage',due_at=?", Date.now() + 3600000);
+    });
+    await evictDurableObject(stub);
+    await inside((app) => { app.schedule = async () => {}; });
+    await drain();
+    expect(calls.some((c) => c.method === "forwardMessage")).toBe(false);
+    expect(await inside((app) => app.db.setting("scan_state"))).toBe("error");
+    expect(await inside((app) => app.db.checkpoint(-9001))).toBe(0);
+  }, 20000);
+
+  it("migrates only the current vault's cursor and retains independent checkpoints", async () => {
+    await inside((app) => {
+      app.db.set("vault_chat_id", -9001);
+      app.db.set("scan_cursor", 8);
+      app.db.enqueue("notification", { chat_id: 7, text: "Pending" }, 3600000);
+    });
+    await evictDurableObject(stub);
+    await inside((app) => {
+      app.schedule = async () => {};
+      expect(app.db.checkpoint(-9001)).toBe(8);
+      expect(app.db.checkpoint(-9002)).toBe(0);
+      expect(app.db.one("SELECT COUNT(*) n FROM tasks").n).toBe(1);
+      app.startScan(-9002, true, 2);
+    });
+    await drain();
+    expect(await inside((app) => app.db.checkpoint(-9001))).toBe(8);
+    expect(await inside((app) => app.db.checkpoint(-9002))).toBe(2);
+  }, 20000);
+
+  it("benchmarks 1000 initial IDs then inspects only 20 new IDs with live cache reuse", async () => {
+    await inside((app) => app.startScan(-9001, true, 1000));
+    await drain();
+    expect(calls.filter((c) => c.method === "forwardMessage")).toHaveLength(1000);
+    expect(calls.filter((c) => c.method === "deleteMessages")).toHaveLength(100);
+    await inside((app) => {
+      for (let id = 1001; id <= 1010; id++) app.db.index({
+        chat: { id: -9001 }, message_id: id,
+        audio: { file_unique_id: `live-${id}`, file_id: `file-${id}` },
+      });
+    });
+    calls.length = 0;
+    await syncTo(1020);
+    await drain();
+    expect(calls.filter((c) => c.method === "forwardMessage").map((c) => c.message_id))
+      .toEqual(Array.from({ length: 10 }, (_, i) => i + 1011));
+    expect(calls.filter((c) => c.method === "deleteMessages")).toHaveLength(1);
+    expect(await inside((app) => app.db.checkpoint(-9001))).toBe(1020);
+    expect(await inside((app) => app.db.one("SELECT COUNT(*) n FROM tracks").n)).toBe(1020);
+  }, 30000);
+});
+
+describe("destination pacing and scheduler eligibility", () => {
+  it("defaults publishing to 1.1 seconds and respects configured overrides", async () => {
+    await inside((app) => {
+      app.env = { ...app.env, PUBLISH_DELAY_SECONDS: undefined };
+      expect(app.pacing(-1001).floor).toBe(1100);
+      app.env.PUBLISH_DELAY_SECONDS = "3";
+      expect(app.pacing(-1001).floor).toBe(3000);
+      app.env.PUBLISH_DELAY_SECONDS = "0.5";
+      expect(app.pacing(-1001).floor).toBe(500);
+      expect(app.pacing(7).floor).toBe(1100);
+    });
+  });
+
+  it("enforces the owner cooldown across notifications and scan forwards", async () => {
+    await inside((app) => {
+      app.notify("First");
+      app.notify("Second");
+      app.startScan(-9001, true, 1);
+    });
+    await inside(async (app) => {
+      await app.alarm();
+      expect(calls).toHaveLength(1);
+      expect(app.pacing(7).until).toBeGreaterThanOrEqual(Date.now() + 1000);
+      await app.alarm();
+      expect(calls).toHaveLength(1);
+      const now = app.pacing(7).until;
+      const time = vi.spyOn(Date, "now").mockReturnValue(now);
+      await app.alarm();
+      expect(calls).toHaveLength(2);
+      expect(calls.at(-1).text).toBe("Second");
+      await app.alarm();
+      expect(calls).toHaveLength(2);
+      time.mockReturnValue(app.pacing(7).until);
+      await app.alarm();
+      expect(calls.at(-1).method).toBe("forwardMessage");
+      expect(calls).toHaveLength(3);
+      // Cleanup and completion do not send a new message to the owner.
+      await app.alarm();
+      expect(calls.at(-1).method).toBe("deleteMessages");
+      time.mockRestore();
+    });
+  });
+
+  it("runs ready publishing while the owner is cooling and persists the earliest alarm", async () => {
+    const id = await seed();
+    await api("POST", `/playlists/${id}/publish`, undefined, 202);
+    await inside((app) => {
+      app.db.set("chat_pacing:7", JSON.stringify({ until: Date.now() + 60000 }));
+    });
+    for (let i = 0; i < 4; i++) await inside((app) => app.alarm());
+    expect(calls.some((c) => c.method === "copyMessage")).toBe(true);
+    expect(calls.some((c) => c.method === "sendMessage")).toBe(false);
+    await inside(async (app) => {
+      app.db.set("chat_pacing:-1001", JSON.stringify({ until: Date.now() + 30000 }));
+      delete app.schedule;
+      await app.schedule();
+      const alarm = await app.ctx.storage.getAlarm();
+      expect(alarm).toBe(app.pacing(-1001).until);
+      await app.alarm();
+      expect(await app.ctx.storage.getAlarm()).toBe(alarm);
+      app.schedule = async () => {};
+    });
+  });
+
+  it("allows another channel to send while one channel cools, retaining playlist order", async () => {
+    const id = await seed();
+    const other = await api("POST", "/playlists", { name: "Second" }, 201);
+    await api("PATCH", `/playlists/${other.id}`, { channel_id: -1002 });
+    for (const track_id of [3, 2, 1]) await api("POST", `/playlists/${other.id}/tracks`, { track_id });
+    await api("POST", `/playlists/${id}/publish`, undefined, 202);
+    await api("POST", `/playlists/${other.id}/publish`, undefined, 202);
+    await inside((app) => {
+      app.db.set("chat_pacing:-1001", JSON.stringify({ until: Date.now() + 60000 }));
+      app.db.set("chat_pacing:7", JSON.stringify({ until: Date.now() + 60000 }));
+    });
+    for (let i = 0; i < 20; i++) await inside((app) => app.alarm());
+    expect(calls.filter((c) => c.method === "copyMessage").map((c) => [c.chat_id, c.message_id]))
+      .toEqual([[-1002, 3], [-1002, 2], [-1002, 1]]);
+    await drain();
+    expect(calls.filter((c) => c.method === "copyMessage" && c.chat_id === -1001).map((c) => c.message_id))
+      .toEqual([1, 2, 3]);
+  });
+
+  it("doubles only the affected chat interval, caps it, and restores its floor after 20 successes", async () => {
+    await inside((app) => {
+      app.env = { ...app.env, PUBLISH_DELAY_SECONDS: "1.1" };
+      app.db.enqueue("notification", { chat_id: -1001, text: "Paced" });
+    });
+    fail = () => ({ error_code: 429, description: "Too Many Requests", parameters: { retry_after: 30 } });
+    for (const interval of [2200, 4400, 5000, 5000]) {
+      await step();
+      await inside(async (app) => {
+        expect(app.pacing(-1001).interval).toBe(interval);
+        expect(app.pacing(-1002).interval).toBe(1100);
+        expect(app.pacing(7).interval).toBe(1100);
+        expect(Number(app.db.setting("bot_not_before"))).toBeGreaterThan(Date.now() + 29000);
+        const count = calls.length;
+        await app.alarm();
+        expect(calls).toHaveLength(count);
+      });
+    }
+    fail = null;
+    await step();
+    for (let i = 1; i < 20; i++) {
+      await inside((app) => app.db.enqueue("notification", { chat_id: -1001, text: "Success" }));
+      await step();
+      expect(await inside((app) => app.pacing(-1001).interval)).toBe(i === 19 ? 1100 : 5000);
+    }
+  });
+
+  it("keeps configured floors above five seconds during backoff", async () => {
+    await inside((app) => {
+      app.env = { ...app.env, PUBLISH_DELAY_SECONDS: "8" };
+      app.db.enqueue("notification", { chat_id: -1001, text: "Slow" });
+    });
+    fail = () => ({ error_code: 429, parameters: { retry_after: 1 } });
+    await step();
+    expect(await inside((app) => app.pacing(-1001).interval)).toBe(8000);
+  });
+
+  it("retains cooldowns through eviction and cancellation retains cleanup IDs", async () => {
+    await inside((app) => app.startScan(-9001, true, 3));
+    await step();
+    const until = await inside((app) => app.pacing(7).until);
+    await command("/cancel");
+    expect(await inside((app) => app.db.setting("scan_pending"))).toBe("[101]");
+    await inside((app) => app.db.exec("UPDATE tasks SET due_at=?", Date.now() + 3600000));
+    await evictDurableObject(stub);
+    await inside((app) => {
+      app.schedule = async () => {};
+      expect(app.pacing(7).until).toBe(until);
+    });
+    await command("/resumescan", 2);
+    await drain();
+    expect(calls.filter((c) => c.method === "forwardMessage").map((c) => c.message_id)).toEqual([1, 2, 3]);
+    expect(await inside((app) => app.db.setting("scan_pending"))).toBe("[]");
+  }, 20000);
+});
+
+describe("scan commit failures", () => {
+  it("rolls back metadata, cleanup IDs and cursor together if checkpointing fails", async () => {
+    await inside(async (app) => {
+      app.startScan(-9001, true, 1);
+      const update = vi.spyOn(app.db, "updateTask").mockImplementation(() => {
+        throw new Error("Simulated failure before commit");
+      });
+      await app.alarm();
+      update.mockRestore();
+      expect(app.db.one("SELECT COUNT(*) n FROM tracks").n).toBe(0);
+      expect(app.db.setting("scan_cursor")).toBe("0");
+      expect(app.db.checkpoint(-9001)).toBe(0);
+      expect(app.db.setting("scan_pending", "[]")).toBe("[]");
+      expect(app.db.setting("scan_error")).toContain("may have accepted");
+    });
+    await drain();
+    expect(calls.filter((c) => c.method === "forwardMessage")).toHaveLength(1);
+  });
+
+  it("does not reuse a matching message ID from another vault", async () => {
+    await inside((app) => {
+      app.db.set("vault_chat_id", -9001);
+      app.db.index({ chat: { id: -9002 }, message_id: 1,
+        audio: { file_unique_id: "different-vault", file_id: "other" } });
+    });
+    await syncTo(1);
+    await drain();
+    expect(calls.filter((c) => c.method === "forwardMessage")).toHaveLength(1);
+    expect(await inside((app) => app.db.checkpoint(-9001))).toBe(1);
+  });
+});
+
+describe("owner task fairness", () => {
+  it("delivers a waiting status notification before the next scan forward", async () => {
+    await inside(async (app) => {
+      app.startScan(-9001, true, 3);
+      await app.alarm();
+      app.notify("Scan status");
+      // Both tasks share the owner's next eligible send time. Prefer the
+      // notification that was due before the scan's most recent progress.
+      app.db.exec("UPDATE tasks SET due_at=? WHERE kind='notification'", Date.now() - 10);
+      const time = vi.spyOn(Date, "now").mockReturnValue(app.pacing(7).until);
+      await app.alarm();
+      time.mockRestore();
+    });
+    expect(calls.map((c) => c.method)).toEqual(["forwardMessage", "sendMessage"]);
+    expect(calls.at(-1).text).toBe("Scan status");
   });
 });
