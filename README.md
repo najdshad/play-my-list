@@ -8,6 +8,12 @@ The bot indexes audio from a **vault channel** you choose, you arrange playlists
 
 [`PRD.md`](PRD.md) describes the behaviour, data model and API implemented here.
 
+## Cloudflare serverless deployment
+
+The whole project can run on Cloudflare: a Worker serves the Mini App, REST API, and Telegram webhook; a SQLite-backed Durable Object stores the data and uses durable alarms for scans and publishing. No Python server or tunnel is required for that deployment.
+
+See **[`cloudflare/README.md`](cloudflare/README.md)** for configuration, local testing, deployment, and webhook registration. Use `npm ci`, `npm test`, and `npm run deploy:check` for the Cloudflare implementation. The sections below document the original Python runtime, which remains available for local development and existing installations. Cloudflare starts with a separate database; migration considerations are documented in the deployment guide.
+
 ## How it works
 
 1. **Index the vault** — `/setvault`, then forward any message from the vault channel. The bot probes the channel's message IDs by forwarding each one to your DM, saving audio metadata and deleting the forwarded copy. Interrupted scans resume on startup; `/resumescan` retries a failed scan from its saved cursor. Live indexing picks up new uploads.

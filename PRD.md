@@ -317,3 +317,7 @@ playlist-bot/
 1. **Scan speed on large vaults.** If forward-probing is too slow, the fallback is Pyrogram with the bot token, whose `get_messages` reads messages by ID without forwarding.
 2. **Deleting old messages.** Telegram documents a 48-hour limit; admin rights do not remove it. The bot retains tracking and stops if cleanup fails. The owner must manually clear undeletable posts before retrying.
 3. **Real channel posting limits.** We need to test the actual 429 threshold so we can tune `PUBLISH_DELAY_SECONDS`.
+
+## Deployment update
+
+The original Python implementation described in this document remains supported. A complete Cloudflare Worker deployment now provides the same Mini App/API with webhook delivery, Durable Object SQLite storage, and alarm-driven scanning and publishing. See [`cloudflare/README.md`](cloudflare/README.md) for the current serverless architecture, deployment steps, and operational differences.

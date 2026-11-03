@@ -22,3 +22,11 @@ data/*.db
 data/*.db-*
 data/*.sqlite*
 backup/
+
+# Cloudflare and Node local state
+node_modules/
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+coverage/

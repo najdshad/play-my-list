@@ -1,0 +1,22 @@
+{
+  "name": "play-my-list",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "deploy": "wrangler deploy",
+    "deploy:check": "wrangler deploy --dry-run",
+    "telegram:setup": "node --env-file=.dev.vars cloudflare/scripts/telegram.mjs setup",
+    "telegram:status": "node --env-file=.dev.vars cloudflare/scripts/telegram.mjs status"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.9",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.154.0"
+  }
+}
