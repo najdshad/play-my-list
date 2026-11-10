@@ -1415,18 +1415,6 @@
     margin-top: 20px;
     font-size: 12px;
   }
-  #delete-confirm {
-    margin-top: 14px;
-    font-size: 12px;
-  }
-  #delete-confirm p {
-    color: var(--muted);
-    margin-bottom: 8px;
-  }
-  #delete-confirm button {
-    margin-top: 5px;
-    font-size: 12px;
-  }
   .editor-tip {
     display: flex;
     gap: 10px;

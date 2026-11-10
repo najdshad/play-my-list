@@ -21,12 +21,42 @@ The GitHub Actions workflow tests and deploys the Worker on pushes to `main`. It
 
 These credentials are for deployment only. `BOT_TOKEN` and `WEBHOOK_SECRET` remain Worker secrets and do not need to be added to GitHub Actions. A failed test prevents deployment.
 
+Telegram normally allows a bot to delete only messages posted within the last 48 hours, regardless of administrator rights. To delete older posts, the Worker can use a Telegram account session. This is optional: without it, deleting or republishing a playlist still works for recent posts and fails with tracking retained for older ones.
+
+## Deleting old channel posts
+
+The Worker bundles a small MTProto client and uses your own Telegram account to delete tracked channel posts. The account must be an administrator with *Delete Messages* rights in every playlist channel, and those channels must be in the account's chat list.
+
+1. Create an application at <https://my.telegram.org/apps> and note its **api_id** and **api_hash**.
+2. Add them to `.dev.vars`:
+
+```dotenv
+TELEGRAM_API_ID="123456"
+TELEGRAM_API_HASH="your_api_hash"
+```
+
+3. Generate an account session. This asks for your phone number, the login code, and your two-step password if set:
+
+```bash
+npm run telegram:session
+```
+
+4. Add the printed `TELEGRAM_SESSION="1..."` line to `.dev.vars`, then upload all secrets:
+
+```bash
+npx wrangler secret bulk .dev.vars
+```
+
+The session string grants full access to your Telegram account. Keep it only in `.dev.vars` and Worker secrets, never commit it, and never send it to the Mini App. If it leaks, terminate that session under **Telegram → Settings → Devices**. The Worker only uses the session to resolve the playlist channels and delete the posts it recorded; publishing still uses the bot.
+
+Once configured, playlist deletion and republishing use the account session for cleanup at any post age. If deletion fails, the playlist and its message tracking are kept so you can fix the permission and retry.
+
 ## Requirements
 
 - Node.js 22+ and npm.
 - A Cloudflare account with Workers and SQLite-backed Durable Objects enabled. Check your account's current limits and billing before deploying.
 - A Telegram bot token and your numeric Telegram user ID.
-- A vault channel and at least one separate publish channel. Make the bot an administrator of the vault (Post Messages and Delete Messages are needed for automatic synchronization) and give it Post Messages and Delete Messages in publish channels. Disable Restrict Saving Content in the vault.
+- A vault channel and at least one separate publish channel. Make the bot an administrator of the vault (Post Messages and Delete Messages are needed for automatic synchronization) and give it Post Messages and Delete Messages in publish channels. Disable Restrict Saving Content in the vault. To delete old posts automatically, your own account must also be an administrator with Delete Messages rights in the publish channels.
 
 ## First deployment
 
@@ -46,7 +76,7 @@ cp .dev.vars.example .dev.vars
 node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 ```
 
-Edit `.dev.vars`, setting `BOT_TOKEN` and using the generated value as `WEBHOOK_SECRET`. This file is ignored by Git. Do not put either secret in `wrangler.jsonc` or the Mini App files.
+Edit `.dev.vars`, setting `BOT_TOKEN` and using the generated value as `WEBHOOK_SECRET`. The file also holds the optional Telegram account settings described above. This file is ignored by Git. Do not put any secret in `wrangler.jsonc` or the Mini App files.
 
 Validate and deploy:
 
@@ -81,7 +111,7 @@ Open your bot in Telegram, send `/start`, and tap **Open playlists**. The button
 5. Reorder and publish. Check that the destination contains the tracks in the selected order.
 6. Reopen the editor while publishing to check progress recovery.
 7. Reorder and publish again to check cleanup and replacement.
-8. Delete the playlist; its tracked posts are removed from the channel first.
+8. Delete the playlist; its tracked posts are removed from the channel first, including posts older than 48 hours when the account session is configured.
 
 Publishing preflight failures now appear in the job progress, because channel permissions are checked by the durable job before any deletion. No request needs to stay open while tracks are published.
 
@@ -130,7 +160,7 @@ For 100 tracks, the default configured publishing pauses are about 109 seconds, 
 
 Structured logs record Telegram request methods, counts, durations, flood waits, and scan cache reuse. They omit tokens, request URLs, and message contents.
 
-Publish failures preserve tracked output. Retry publishing to clean up partial posts first. If old posts cannot be deleted, remove them manually in Telegram and retry. The bot cannot bypass Telegram's deletion limits.
+Publish failures preserve tracked output. Retry publishing to clean up partial posts first. If old posts cannot be deleted, check that the bot and the account session have Delete Messages rights; without an account session, posts older than 48 hours must be removed manually. The bot cannot bypass Telegram's deletion limits.
 
 Telegram sends cannot be atomic with database writes. Before each send/copy/forward the app durably records an in-flight operation. If the runtime stops with an uncertain result, it stops that job and asks you to inspect Telegram rather than replaying a potentially accepted message. Read-only requests and confirmed deletions can retry; flood waits are persisted. Failed owner notifications are not retried after uncertain delivery.
 

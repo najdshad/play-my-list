@@ -9,8 +9,9 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index.js";
 import { hmac } from "../src/auth.js";
 import { TelegramError } from "../src/telegram.js";
+import { deleteMessages } from "../src/mtproto.js";
 
-let calls, fail, nextMessage, vaultMarker, authorization, stub;
+let calls, deletes, fail, nextMessage, vaultMarker, authorization, stub;
 
 async function signed({
   owner = 7,
@@ -136,6 +137,7 @@ async function seed() {
 
 beforeEach(async () => {
   calls = [];
+  deletes = [];
   fail = null;
   nextMessage = 100;
   vaultMarker = 1;
@@ -285,6 +287,12 @@ describe("Worker authentication and webhook", () => {
       { BOT_TOKEN: "" },
       { WEBHOOK_SECRET: "" },
       { PUBLISH_DELAY_SECONDS: "NaN" },
+      { TELEGRAM_API_ID: "12345" },
+      {
+        TELEGRAM_API_ID: "12345",
+        TELEGRAM_API_HASH: "not-a-hash",
+        TELEGRAM_SESSION: "1abc=",
+      },
     ]) {
       const response = await worker.fetch(
         new Request("https://app.example/health"),
@@ -293,6 +301,20 @@ describe("Worker authentication and webhook", () => {
       expect(response.status).toBe(503);
       expect((await response.json()).code).toBe("not_configured");
     }
+  });
+
+  it("loads the MTProto client and reports a bad session safely", async () => {
+    await expect(
+      deleteMessages(
+        {
+          TELEGRAM_API_ID: "12345",
+          TELEGRAM_API_HASH: "a".repeat(32),
+          TELEGRAM_SESSION: "1",
+        },
+        -1001,
+        [1],
+      ),
+    ).rejects.toThrow(TelegramError);
   });
 
   it("wakes through the actual alarm binding and retains data after eviction", async () => {
@@ -312,7 +334,10 @@ describe("Worker authentication and webhook", () => {
     });
     expect(await runDurableObjectAlarm(stub)).toBe(true);
     expect(calls.some((c) => c.text === "Alarm test")).toBe(true);
-    expect(await inside((app) => app.ctx.storage.getAlarm())).toBe(null);
+    // The next maintenance pass keeps a future alarm scheduled.
+    expect(await inside((app) => app.ctx.storage.getAlarm())).toBeGreaterThan(
+      Date.now(),
+    );
     await api("POST", "/playlists", { name: "Persisted" }, 201);
     await evictDurableObject(stub);
     expect((await api("GET", "/playlists"))[0].name).toBe("Persisted");
@@ -365,6 +390,60 @@ describe("playlist API and durable publishing", () => {
         (app) => app.db.one("SELECT COUNT(*) n FROM published_messages").n,
       ),
     ).toBe(0);
+  });
+
+  it("uses the account session to delete posts of any age", async () => {
+    const id = await seed();
+    await api("POST", `/playlists/${id}/publish`, undefined, 202);
+    await drain();
+    await inside((app) => {
+      app.env = {
+        ...app.env,
+        TELEGRAM_API_ID: "12345",
+        TELEGRAM_API_HASH: "a".repeat(32),
+        TELEGRAM_SESSION: "1abc=",
+      };
+      app.mtprotoDelete = async (env, chatId, messageIds) => {
+        deletes.push({ chatId, messageIds });
+      };
+    });
+    calls.length = 0;
+    await api("DELETE", `/playlists/${id}`);
+    expect(await api("GET", "/playlists")).toEqual([]);
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0].chatId).toBe(-1001);
+    expect(deletes[0].messageIds.sort()).toEqual([101, 102, 103]);
+    expect(calls.filter((c) => c.method === "deleteMessages")).toHaveLength(0);
+    expect(
+      await inside(
+        (app) => app.db.one("SELECT COUNT(*) n FROM published_messages").n,
+      ),
+    ).toBe(0);
+  });
+
+  it("keeps a playlist when account deletion fails", async () => {
+    const id = await seed();
+    await api("POST", `/playlists/${id}/publish`, undefined, 202);
+    await drain();
+    await inside((app) => {
+      app.env = {
+        ...app.env,
+        TELEGRAM_API_ID: "12345",
+        TELEGRAM_API_HASH: "a".repeat(32),
+        TELEGRAM_SESSION: "1abc=",
+      };
+      app.mtprotoDelete = async () => {
+        throw new TelegramError("CHANNEL_INVALID", 409);
+      };
+    });
+    const { error } = await api("DELETE", `/playlists/${id}`, undefined, 409);
+    expect(error).toContain("CHANNEL_INVALID");
+    await api("GET", `/playlists/${id}`);
+    expect(
+      await inside(
+        (app) => app.db.one("SELECT COUNT(*) n FROM published_messages").n,
+      ),
+    ).toBe(3);
   });
 
   it("keeps a playlist when its published posts cannot be deleted", async () => {

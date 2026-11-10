@@ -66,7 +66,7 @@ Then in Telegram:
 - One or more **playlist channels** where the bot is an admin with *Post Messages* and *Delete Messages*.
 - Your numeric user ID as `OWNER_ID`. Only that account can use the bot.
 
-Telegram normally allows bots to delete only messages posted within the last 48 hours. Administrator rights do not lift that limit.
+Telegram normally allows bots to delete only messages posted within the last 48 hours. Administrator rights do not lift that limit for a bot. The Cloudflare deployment can optionally use a Telegram account session (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION`) to delete posts of any age; see the [Cloudflare guide](cloudflare/README.md#deleting-old-channel-posts).
 
 ## Commands
 
@@ -105,7 +105,7 @@ Telegram 429 responses are always honored via `retry_after`, so these delays are
 ## Publishing, in practice
 
 - Publishing refreshes the bot's permissions first, then deletes tracked posts from the channels where they were actually recorded — including after a playlist moves.
-- If cleanup fails, publishing stops, keeps tracking the undeleted messages, and shows the error. Remove posts older than the deletion limit manually and retry; already-absent messages are skipped.
+- If cleanup fails, publishing stops, keeps tracking the undeleted messages, and shows the error. In the Cloudflare deployment, configure the account session to delete old posts; otherwise remove posts older than the bot deletion limit manually and retry. Already-absent messages are skipped.
 - Only confirmed-unavailable audio is marked missing. Permission failures and temporary outages fail the job without marking valid tracks unavailable. Copy/send timeouts are never retried blindly, because Telegram may already have accepted the post.
 - Telegram delivery and SQLite commits cannot be atomic. After an ambiguous send failure, inspect the channel and remove any extra post manually before retrying. Publishing replaces posts in batches; it is not an atomic channel swap.
 - Each track keeps its own vault channel. Changing the vault changes the search index shown in the app; existing playlists keep their source references. The vault cannot be a publish target.

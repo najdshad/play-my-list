@@ -17,6 +17,7 @@ import {
   sourceUnavailable,
   invalidAudio,
 } from "./telegram.js";
+import { deleteMessages as mtprotoDelete, mtprotoConfigured } from "./mtproto.js";
 
 const CLEANUP_BATCH = 10;
 
@@ -24,6 +25,7 @@ export class PlaylistApp extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.db = new Store(ctx.storage, env.OWNER_ID);
+    this.mtprotoDelete = mtprotoDelete;
     ctx.blockConcurrencyWhile(async () => {
       this.db.maintain();
       if ((await ctx.storage.getAlarm()) === null)
@@ -262,7 +264,7 @@ export class PlaylistApp extends DurableObject {
         } catch (error) {
           if (!(error instanceof TelegramError)) throw error;
           throw new AppError(
-            `Could not delete this playlist's posts: ${error.message || error} Telegram normally allows deletion only within 48 hours. Check Delete Messages permission; if the posts are too old, delete them manually in Telegram, then try again. Their tracking has been retained.`,
+            `Could not delete this playlist's posts: ${error.message || error} Check that the Telegram account has Delete Messages rights in the channel. Posts older than 48 hours need TELEGRAM_SESSION configured. Their tracking has been retained.`,
             409,
             "published_messages_remain",
           );
@@ -744,7 +746,7 @@ export class PlaylistApp extends DurableObject {
         const state = JSON.parse(job.state);
         if (state.phase === "clear")
           message +=
-            " Previous-post tracking has been retained. Check Delete Messages permission; Telegram normally limits deletion to 48 hours. If necessary, delete the old posts manually, then publish again.";
+            " Previous-post tracking has been retained. Check Delete Messages permission; posts older than 48 hours need TELEGRAM_SESSION configured. If necessary, delete the old posts manually, then publish again.";
         this.finishPublish(
           task,
           job,
@@ -806,12 +808,19 @@ export class PlaylistApp extends DurableObject {
       playlistId,
       first.chat_id,
     );
-    const parameters = {
-      chat_id: first.chat_id,
-      message_ids: batch.map((r) => r.message_id),
-    };
-    if (task) await this.call(task, "deleteMessages", parameters);
-    else await telegram(this.env.BOT_TOKEN, "deleteMessages", parameters);
+    const messageIds = batch.map((r) => r.message_id);
+    if (mtprotoConfigured(this.env))
+      await this.mtprotoDelete(this.env, first.chat_id, messageIds);
+    else if (task)
+      await this.call(task, "deleteMessages", {
+        chat_id: first.chat_id,
+        message_ids: messageIds,
+      });
+    else
+      await telegram(this.env.BOT_TOKEN, "deleteMessages", {
+        chat_id: first.chat_id,
+        message_ids: messageIds,
+      });
     this.db.atomic(() => {
       this.db.exec(
         `DELETE FROM published_messages WHERE id IN (${batch.map(() => "?").join(",")})`,

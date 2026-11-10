@@ -1,2 +1,8 @@
 BOT_TOKEN="your_bot_token"
 WEBHOOK_SECRET="replace_with_a_random_secret"
+# Optional: enables deletion of channel posts older than 48 hours.
+# Create an app at https://my.telegram.org, then run:
+#   npm run telegram:session
+# TELEGRAM_API_ID=""
+# TELEGRAM_API_HASH=""
+# TELEGRAM_SESSION=""

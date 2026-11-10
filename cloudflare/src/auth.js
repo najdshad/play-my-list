@@ -96,6 +96,26 @@ export function configuration(env) {
       );
     }
   }
+  const teleproto = ["TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_SESSION"];
+  const configured = teleproto.filter((name) => env[name]);
+  if (configured.length && configured.length < teleproto.length)
+    throw new AppError(
+      "Set TELEGRAM_API_ID, TELEGRAM_API_HASH and TELEGRAM_SESSION together.",
+      503,
+      "not_configured",
+    );
+  if (configured.length) {
+    if (
+      !/^\d+$/.test(env.TELEGRAM_API_ID) ||
+      !/^[0-9a-f]{32}$/i.test(env.TELEGRAM_API_HASH) ||
+      !/^1[A-Za-z0-9+/=]+$/.test(env.TELEGRAM_SESSION)
+    )
+      throw new AppError(
+        "TELEGRAM_API_ID, TELEGRAM_API_HASH or TELEGRAM_SESSION has an invalid format.",
+        503,
+        "not_configured",
+      );
+  }
   if (env.WEB_APP_URL) {
     let url;
     try {

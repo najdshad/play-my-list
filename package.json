@@ -12,11 +12,15 @@
     "deploy": "wrangler deploy",
     "deploy:check": "wrangler deploy --dry-run",
     "telegram:setup": "node --env-file=.dev.vars cloudflare/scripts/telegram.mjs setup",
+    "telegram:session": "node --env-file=.dev.vars cloudflare/scripts/telegram-session.mjs",
     "telegram:status": "node --env-file=.dev.vars cloudflare/scripts/telegram.mjs status"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.4.9",
     "vitest": "^4.1.0",
     "wrangler": "^4.154.0"
+  },
+  "dependencies": {
+    "teleproto": "^1.233.0"
   }
 }
