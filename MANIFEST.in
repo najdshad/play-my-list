@@ -1,2 +1,0 @@
-include PRD.md requirements.txt .env.example
-recursive-include tests *.py

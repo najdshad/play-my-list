@@ -1,32 +1,14 @@
-# Local configuration and environments
+# Local secrets and environments
 .env
 .env.*
-!.env.example
 .venv/
 venv/
 
-# Python caches and build artifacts
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-build/
-dist/
-*.egg-info/
-
-# Local databases and backups
-data/*.db
-data/*.db-*
-data/*.sqlite*
-backup/
-
-# Cloudflare and Node local state
+# Node and Cloudflare local state
 node_modules/
 .wrangler/
 .dev.vars
 .dev.vars.*
 !.dev.vars.example
 coverage/
+data/

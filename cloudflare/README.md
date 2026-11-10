@@ -1,6 +1,6 @@
 # Deploy the whole project on Cloudflare
 
-The Mini App, REST API, Telegram webhook, database, and background jobs run on Cloudflare. No Python process, VPS, tunnel, D1 database, or audio storage is needed for this deployment.
+The Mini App, REST API, Telegram webhook, database, and background jobs run on Cloudflare. No VPS, tunnel, D1 database, or audio storage is needed for this deployment.
 
 The Worker serves the existing `miniapp/` assets and authenticates API requests using Telegram's signed `initData`. One SQLite-backed Durable Object holds the owner's playlists, tracks, channel permissions, message tracking, webhook deduplication records, and pending work. Durable Object alarms advance scans and publishes with at most one Telegram request per step. Each confirmed scan forward saves its metadata and cursor immediately; cleanup uses one `deleteMessages` call after ten forwards or at completion. Delays and flood waits are persisted instead of sleeping in a request handler.
 
@@ -89,7 +89,7 @@ npx wrangler secret bulk .dev.vars
 
 The initial deployment creates the Worker and Durable Object migration. Uploading the secrets then configures the Worker. Wrangler prints your HTTPS Worker address, such as `https://play-my-list.YOUR-SUBDOMAIN.workers.dev`.
 
-**Stop any Python polling process using this bot token before registering the webhook.** A bot uses webhook delivery instead of long polling in this deployment.
+**Stop any long-polling process using this bot token before registering the webhook.** A bot uses webhook delivery instead of long polling in this deployment.
 
 ```bash
 npm run telegram:setup -- https://play-my-list.YOUR-SUBDOMAIN.workers.dev
@@ -131,7 +131,7 @@ npm test
 npm run deploy:check
 ```
 
-Tests run in Cloudflare's `workerd` runtime with local Durable Object SQLite and mocked Telegram responses. They do not register a webhook or send real Telegram messages. The Python test/demo commands in the root README continue to exercise the original Python implementation.
+Tests run in Cloudflare's `workerd` runtime with local Durable Object SQLite and mocked Telegram responses. They do not register a webhook or send real Telegram messages.
 
 ## Operations and recovery
 
@@ -152,7 +152,7 @@ Checkpoints and destination pacing live in the existing settings storage. On upg
 
 Database maintenance keeps the latest finished publish result per playlist and all running jobs, and drops finished jobs' internal track snapshots. It removes unused tracks from previous vaults, unused unavailable tracks, and departed channels with no remaining references. The current vault library, playlist tracks, published-post tracking, and active job snapshots remain available. A rescan removes unused metadata for source messages it confirms are gone. Telegram does not report channel-message deletions, so old vault entries require a rescan to verify them.
 
-Daily maintenance alarms expire webhook deduplication receipts after seven days and remove expired pacing records for channels no longer in use, even when the bot is idle. Vault coverage checkpoints remain available when switching back to a previous vault. Cloudflare's SQLite API does not permit the application's vacuum and page-reclamation commands: deleting rows frees storage for reuse, but the application cannot promise that Cloudflare's physical database file shrinks. The Python deployment reclaims its own SQLite pages and WAL directly.
+Daily maintenance alarms expire webhook deduplication receipts after seven days and remove expired pacing records for channels no longer in use, even when the bot is idle. Vault coverage checkpoints remain available when switching back to a previous vault. Cloudflare's SQLite API does not permit the application's vacuum and page-reclamation commands: deleting rows frees storage for reuse, but the application cannot promise that Cloudflare's physical database file shrinks.
 
 `PUBLISH_DELAY_SECONDS` defaults to `1.1` seconds and honors explicit overrides. `SCAN_DELAY_SECONDS` sets the owner-chat interval, with a minimum of `1.1` seconds between owner messages, including scan forwards and notifications. Normal cooldowns are persisted per destination: a waiting owner chat or channel does not block eligible work elsewhere. Alarms wake for the earliest eligible task. A Telegram `429` still pauses the whole bot for `retry_after`; the affected chat's interval doubles up to the greater of five seconds or its configured floor. Twenty successful sends restore that floor. Channel locks and sequential playlist jobs preserve individual posts in playlist order.
 
@@ -164,9 +164,9 @@ Publish failures preserve tracked output. Retry publishing to clean up partial p
 
 Telegram sends cannot be atomic with database writes. Before each send/copy/forward the app durably records an in-flight operation. If the runtime stops with an uncertain result, it stops that job and asks you to inspect Telegram rather than replaying a potentially accepted message. Read-only requests and confirmed deletions can retry; flood waits are persisted. Failed owner notifications are not retried after uncertain delivery.
 
-Back up important playlists and maintain the vault channel. This deployment uses its own new Cloudflare database: **an existing Python SQLite database is not automatically imported.** Keep the Python database as a backup; select and rescan the vault and recreate playlists in Cloudflare before retiring the old deployment. Channel posts tracked only by the old deployment are not automatically adopted or deleted by this one.
+Back up important playlists and maintain the vault channel.
 
-The static UI is public; all `/api/*` data and mutations require the configured owner's valid Telegram session. Webhook requests require the secret token sent by Telegram. The test bridge in `tests/browser_server.py` is never deployed.
+The static UI is public; all `/api/*` data and mutations require the configured owner's valid Telegram session. Webhook requests require the secret token sent by Telegram.
 
 ## Cloudflare documentation
 

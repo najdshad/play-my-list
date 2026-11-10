@@ -83,7 +83,7 @@ try {
       short_description: "Organize music from your Telegram vault and publish playlists to your channels.",
     });
     console.log(
-      "Webhook registered; command menu and bot descriptions updated. Stop the Python polling process before testing this bot.",
+      "Webhook registered; command menu and bot descriptions updated. Stop any long-polling process before testing this bot.",
     );
   } else if (action !== "status")
     throw new Error("Use setup <https-worker-url> or status.");
